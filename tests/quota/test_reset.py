@@ -40,3 +40,25 @@ def test_fallback_backoff_steps_then_caps_at_one_hour() -> None:
     assert fallback_backoff(1, now=NOW) == NOW + timedelta(minutes=30)
     assert fallback_backoff(2, now=NOW) == NOW + timedelta(hours=1)
     assert fallback_backoff(9, now=NOW) == NOW + timedelta(hours=1)
+
+
+def test_rejects_invalid_clock_hours() -> None:
+    assert parse_reset_at("resets at 13pm", now=NOW) is None
+    assert parse_reset_at("resets at 0pm", now=NOW) is None
+
+
+def test_rejects_invalid_clock_minutes() -> None:
+    assert parse_reset_at("resets at 3:75pm", now=NOW) is None
+
+
+def test_past_iso_timestamp_is_rejected() -> None:
+    assert parse_reset_at("limit, resets at 2026-08-10T11:00:00Z", now=NOW) is None
+
+
+def test_strategy_precedence_chooses_future_over_past() -> None:
+    # Text with both a past epoch and a future ISO timestamp.
+    # Must return the future ISO time, not None.
+    past_epoch = int((NOW - timedelta(hours=1)).timestamp())
+    future_iso_time = datetime(2026, 8, 10, 15, 0, tzinfo=UTC)
+    text = f"limit|{past_epoch}, resets at 2026-08-10T15:00:00Z"
+    assert parse_reset_at(text, now=NOW) == future_iso_time

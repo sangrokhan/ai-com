@@ -1,6 +1,8 @@
 import re
 from datetime import UTC, datetime, timedelta
 
+# Epoch parsing requires a literal | immediately before the digits, matching the CLI error format.
+# Without this anchor, any unrelated 9-11 digit sequence could produce a false positive.
 _EPOCH = re.compile(r"\|(\d{9,11})\b")
 _ISO = re.compile(r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?)(Z|[+-]\d{2}:?\d{2})?")
 _CLOCK = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", re.IGNORECASE)
@@ -39,8 +41,14 @@ def _from_clock(text: str, now: datetime) -> datetime | None:
     match = _CLOCK.search(text)
     if not match:
         return None
-    hour = int(match.group(1)) % 12
-    minute = int(match.group(2) or 0)
+    hour_str = int(match.group(1))
+    minute_str = int(match.group(2) or 0)
+    # Reject out-of-range hours (must be 1-12) and minutes (must be 0-59).
+    # Return None to allow fallback to next strategy rather than silently clamping.
+    if hour_str < 1 or hour_str > 12 or minute_str > 59:
+        return None
+    hour = hour_str % 12
+    minute = minute_str
     if match.group(3).lower() == "pm":
         hour += 12
     candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
