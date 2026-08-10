@@ -2,12 +2,16 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
 from aicom.domain.enums import ExitReason
 from aicom.executor.base import Executor, RunOutcome, RunRequest
+from aicom.executor.secrets import assert_resolved
 from aicom.executor.stream import ParsedEvent, StreamParser
+
+_JOIN_GRACE_SECONDS = 5
 
 
 def build_argv(req: RunRequest, *, binary: str, mcp_config_path: Path) -> list[str]:
@@ -37,6 +41,10 @@ class ClaudeCliExecutor(Executor):
     def run(
         self, req: RunRequest, on_event: Callable[[ParsedEvent], None]
     ) -> RunOutcome:
+        # Guard the disk-write boundary: a caller that forgot to call
+        # resolve_secrets() must fail loudly, not leak plaintext to disk.
+        assert_resolved(req.mcp_config)
+
         parser = StreamParser()
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "mcp.json"
@@ -53,19 +61,49 @@ class ClaudeCliExecutor(Executor):
                 text=True,
                 bufsize=1,
             )
-            timed_out = False
             assert proc.stdout is not None
-            try:
+            assert proc.stderr is not None
+
+            # Drain stdout and stderr on their own threads so that:
+            #  - a child that hangs while holding stdout open (no more
+            #    output, but alive) does not block the wall-clock deadline
+            #    below (Finding 1: `proc.wait(timeout=...)` runs
+            #    concurrently, not after the stdout loop finishes).
+            #  - a child that fills the stderr OS pipe buffer while stdout
+            #    is still open cannot deadlock the parent (Finding 2:
+            #    stderr is drained concurrently with stdout, not after it).
+            stderr_chunks: list[str] = []
+
+            def read_stdout() -> None:
+                assert proc.stdout is not None
                 for line in proc.stdout:
                     event = parser.feed(line)
                     if event is not None:
                         on_event(event)
+
+            def read_stderr() -> None:
+                assert proc.stderr is not None
+                stderr_chunks.extend(proc.stderr)
+
+            stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stdout_thread.start()
+            stderr_thread.start()
+
+            timed_out = False
+            try:
                 proc.wait(timeout=req.timeout_seconds)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 proc.kill()
                 proc.wait()
-            stderr = proc.stderr.read() if proc.stderr else ""
+
+            # The process has exited (or been killed): its pipes will hit
+            # EOF, so the reader threads finish promptly. Any output read
+            # before the kill has already been fed to the parser/buffer.
+            stdout_thread.join(timeout=_JOIN_GRACE_SECONDS)
+            stderr_thread.join(timeout=_JOIN_GRACE_SECONDS)
+            stderr = "".join(stderr_chunks)
 
         return RunOutcome(
             reason=self._reason(proc.returncode, timed_out, parser, stderr),
