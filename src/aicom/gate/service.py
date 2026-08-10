@@ -44,6 +44,15 @@ def request_approval(
         allowed = ", ".join(k.value for k in ApprovalKind)
         raise UnknownApprovalKind(f"kind must be one of: {allowed}") from exc
 
+    # Ordering is deliberate: create the approval row first, then transition the
+    # run. If the run is not RUNNING, transition() is a no-op (0 rows) and we
+    # raise RunNotRunning below with the approval row still only flushed, never
+    # committed. Callers (server.py) must not commit between these two calls —
+    # on RunNotRunning they roll back the session, which discards the flushed
+    # approval along with it. Doing this in the opposite order (transition
+    # first) would be worse: a run could end up parked in AWAITING_APPROVAL
+    # with no approval row to resolve it, hanging forever with no way for an
+    # operator to release it.
     approval = create_approval(
         session,
         run_id=run_id,

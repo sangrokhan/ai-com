@@ -9,6 +9,10 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "slack-sdk>=3.27",
+    # Ceiling required: mcp 2.0.0 removed mcp.server.fastmcp.FastMCP, which
+    # src/aicom/gate/server.py (the sole route to gated actions) imports.
+    # Do not relax/bump this past <2.0 until server.py is migrated off
+    # mcp.server.fastmcp (e.g. to mcp.server.mcpserver.MCPServer in 2.x).
     "mcp>=1.0,<2.0",
     "pydantic-settings>=2.2",
 ]

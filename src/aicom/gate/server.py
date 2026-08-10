@@ -9,6 +9,11 @@ import os
 import uuid
 from datetime import UTC, datetime
 
+# mcp.server.fastmcp.FastMCP was removed in mcp 2.0.0 (renamed/restructured to
+# mcp.server.mcpserver.MCPServer). pyproject.toml pins "mcp>=1.0,<2.0" to keep
+# this import working. Migrate this module to the 2.x API before that pin is
+# ever relaxed/bumped, or this - the sole route to gated actions - breaks at
+# import time.
 from mcp.server.fastmcp import FastMCP
 
 from aicom.config import load_settings
