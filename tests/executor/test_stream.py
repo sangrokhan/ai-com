@@ -59,3 +59,12 @@ def test_ordinary_error_is_not_a_usage_limit() -> None:
     parser = StreamParser()
     parser.feed(json.dumps({"type": "result", "is_error": True, "result": "tool failed"}))
     assert parser.saw_usage_limit is False
+
+
+def test_deeply_nested_json_does_not_raise() -> None:
+    parser = StreamParser()
+    deeply_nested = "[" * 2000
+    event = parser.feed(deeply_nested)
+    assert event is not None
+    assert event.type == "unparsed"
+    assert event.payload["raw"] == deeply_nested

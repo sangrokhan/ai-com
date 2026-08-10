@@ -32,7 +32,7 @@ class StreamParser:
             if not isinstance(payload, dict):
                 raise TypeError("not an object")
             type_ = str(payload.get("type", "unknown"))
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except Exception:  # noqa: BLE001 - broad catch is intentional; deeply nested JSON can raise RecursionError
             payload = {"raw": stripped}
             type_ = "unparsed"
         else:
