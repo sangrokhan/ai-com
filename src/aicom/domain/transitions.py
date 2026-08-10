@@ -1,7 +1,13 @@
 from aicom.domain.enums import RunStatus
 
 TERMINAL: frozenset[RunStatus] = frozenset(
-    {RunStatus.SUCCEEDED, RunStatus.FAILED, RunStatus.TIMED_OUT, RunStatus.CANCELLED}
+    {
+        RunStatus.SUCCEEDED,
+        RunStatus.FAILED,
+        RunStatus.TIMED_OUT,
+        RunStatus.CANCELLED,
+        RunStatus.SUPERSEDED,
+    }
 )
 
 _ALLOWED: dict[RunStatus, frozenset[RunStatus]] = {
@@ -14,6 +20,7 @@ _ALLOWED: dict[RunStatus, frozenset[RunStatus]] = {
             RunStatus.AWAITING_APPROVAL,
             RunStatus.QUEUED,
             RunStatus.CANCELLED,
+            RunStatus.SUPERSEDED,
         }
     ),
     RunStatus.AWAITING_APPROVAL: frozenset({RunStatus.QUEUED, RunStatus.CANCELLED}),

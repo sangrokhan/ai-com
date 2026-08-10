@@ -1,3 +1,5 @@
+import logging
+import threading
 import uuid
 from datetime import UTC, datetime
 
@@ -25,6 +27,8 @@ from aicom.store.system_state import (
     pause_notified_at,
     set_pause,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
 GATE_TOOL = "mcp__gate__request_approval_tool"
@@ -105,7 +109,31 @@ class Worker:
                 session.commit()
             next_seq += 1
 
-        return self._executor.run(request, on_event)
+        # `on_event` only fires when the agent emits stream output, so a run
+        # that works silently for a long stretch would otherwise never touch
+        # its heartbeat and Task 13's sweeper would wrongly reclaim it as
+        # stale mid-flight. A background ticker keeps the heartbeat fresh on
+        # a time basis, independent of event arrival, for as long as the
+        # executor is actually running.
+        stop = threading.Event()
+
+        def heartbeat_loop() -> None:
+            interval = self._settings.worker_heartbeat_seconds
+            while not stop.wait(interval):
+                try:
+                    with self._sessions() as session:
+                        touch_heartbeat(session, run_id, datetime.now(UTC))
+                        session.commit()
+                except Exception:  # a heartbeat hiccup must never kill the run
+                    logger.exception("heartbeat tick failed for run %s", run_id)
+
+        ticker = threading.Thread(target=heartbeat_loop, name=f"heartbeat-{run_id}", daemon=True)
+        ticker.start()
+        try:
+            return self._executor.run(request, on_event)
+        finally:
+            stop.set()
+            ticker.join(timeout=5)
 
     def finalize(
         self,
@@ -115,13 +143,20 @@ class Worker:
         request: RunRequest,
         now: datetime,
     ) -> None:
+        # Captured at request-build time, not re-derived here: this is true
+        # only if THIS execution actually consumed a resume (i.e. the run was
+        # resume_pending when the request was built). A resume that arrives
+        # for this same run WHILE this execution was in flight — e.g. a fast
+        # operator approving a gate request the run just made, moments before
+        # this finalize() runs — must not be confused with it, or the fresh
+        # resume_pending/resume_note that raced in gets clobbered below.
+        consumed_resume = request.resume_session_id is not None
+
         run.session_id = outcome.session_id or run.session_id
         run.cost_usd = outcome.cost_usd
         run.token_in = outcome.token_in
         run.token_out = outcome.token_out
         run.exit_reason = outcome.reason.value
-        run.resume_pending = False
-        run.resume_note = None
         session.flush()
 
         if outcome.reason is ExitReason.USAGE_LIMIT:
@@ -138,7 +173,7 @@ class Worker:
             return
 
         if outcome.reason in {ExitReason.CRASHED, ExitReason.TIMEOUT}:
-            self._handle_failure(session, run, outcome, now)
+            self._handle_failure(session, run, outcome, now, consumed_resume=consumed_resume)
             return
 
         sha = commit_run_artifacts(
@@ -148,7 +183,24 @@ class Worker:
             repo=self._settings.artifact_repo_path,
             label=f"{run.task.agent.name}/{run.task.title}",
         )
-        transition(session, run.id, RunStatus.RUNNING, RunStatus.SUCCEEDED, ended_at=now)
+        # Fold the resume-flag clear into the same conditional UPDATE as the
+        # status transition: it only takes effect if the run was still
+        # RUNNING, i.e. still ours. If it wasn't — because the run moved out
+        # from under us (the race above) — applied is False and this method
+        # takes NO further side effects: no task status flip, no success
+        # report to Slack for a run that isn't actually done.
+        resume_clear = {"resume_pending": False, "resume_note": None} if consumed_resume else {}
+        applied = transition(
+            session, run.id, RunStatus.RUNNING, RunStatus.SUCCEEDED, ended_at=now, **resume_clear
+        )
+        if not applied:
+            logger.warning(
+                "run %s finished but was no longer RUNNING at finalize time "
+                "(status changed underneath it, likely a race with a Slack "
+                "resume); skipping success side effects",
+                run.id,
+            )
+            return
         run.task.status = TaskStatus.DONE
         self._notifier.send_run_report(
             RunReport(
@@ -185,19 +237,53 @@ class Worker:
             mark_pause_notified(session, now)
 
     def _handle_failure(
-        self, session: Session, run: Run, outcome: RunOutcome, now: datetime
+        self,
+        session: Session,
+        run: Run,
+        outcome: RunOutcome,
+        now: datetime,
+        *,
+        consumed_resume: bool,
     ) -> None:
+        resume_clear = {"resume_pending": False, "resume_note": None} if consumed_resume else {}
         if run.attempt < MAX_ATTEMPTS:
+            # Capture the note BEFORE transition(): that call updates via
+            # synchronize_session="fetch", which (when resume_clear applies)
+            # immediately overwrites this same in-memory `run` object's
+            # resume_note to None — reading it after would always see None.
+            carried_note = run.resume_note if consumed_resume else None
             # This attempt is superseded by a fresh run row, not the task's
             # final word on the matter — FAILED/TIMED_OUT is reserved for the
             # attempt that actually exhausts the retry budget, so a status
-            # scan over a task's runs can tell "gave up" from "tried again".
-            # exit_reason (set above in finalize) still records why it ended.
-            transition(session, run.id, RunStatus.RUNNING, RunStatus.CANCELLED, ended_at=now)
-            session.add(Run(id=uuid.uuid4(), task_id=run.task_id, attempt=run.attempt + 1))
+            # scan over a task's runs can tell "gave up" from "was replaced
+            # by a retry" from "a human cancelled it". exit_reason (set above
+            # in finalize) still records why this particular attempt ended.
+            transition(
+                session,
+                run.id,
+                RunStatus.RUNNING,
+                RunStatus.SUPERSEDED,
+                ended_at=now,
+                **resume_clear,
+            )
+            session.add(
+                Run(
+                    id=uuid.uuid4(),
+                    task_id=run.task_id,
+                    attempt=run.attempt + 1,
+                    # If this crashed run had itself just been resumed with a
+                    # sign-off decision, that decision must not be lost: the
+                    # retry needs to know it too, or the agent will redo (or
+                    # re-request) the gated work blind. Only the note carries
+                    # forward, not resume_pending/session_id — the crashed
+                    # process's CLI session cannot be resumed, so the retry
+                    # starts fresh but with the decision still in its prompt.
+                    resume_note=carried_note,
+                )
+            )
             return
         target = RunStatus.TIMED_OUT if outcome.reason is ExitReason.TIMEOUT else RunStatus.FAILED
-        transition(session, run.id, RunStatus.RUNNING, target, ended_at=now)
+        transition(session, run.id, RunStatus.RUNNING, target, ended_at=now, **resume_clear)
         run.task.status = TaskStatus.FAILED
         self._notifier.send_run_report(
             RunReport(

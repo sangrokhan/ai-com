@@ -3,6 +3,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aicom.config import Settings
@@ -141,9 +142,10 @@ def test_gate_request_leaves_run_parked_and_sends_approval(
     sessions: sessionmaker[Session], session: Session, tmp_path: Path
 ) -> None:
     from aicom.gate.service import request_approval
+    from aicom.store.models import Approval
 
     run = _queued(session)
-    executor, notifier = FakeExecutor(), FakeNotifier()
+    notifier = FakeNotifier()
 
     class GateExecutor(FakeExecutor):
         def run(self, req, on_event):  # type: ignore[no-untyped-def]
@@ -172,6 +174,14 @@ def test_gate_request_leaves_run_parked_and_sends_approval(
     assert len(notifier.approvals) == 1
     assert notifier.approvals[0].payload == {"amount_usd": 20}
 
+    # attach_slack_ref must have run, or Task 13's reminders have nothing to
+    # thread onto: the FakeNotifier hands back a DispatchRef that finalize()
+    # is responsible for persisting onto the approval row.
+    approval_row = session.scalar(select(Approval).where(Approval.run_id == run.id))
+    assert approval_row is not None
+    assert approval_row.slack_channel == "C1"
+    assert approval_row.slack_ts == "1.000"
+
 
 def test_resume_passes_session_id_and_decision_note(
     sessions: sessionmaker[Session], session: Session, tmp_path: Path
@@ -189,3 +199,138 @@ def test_resume_passes_session_id_and_decision_note(
     request = executor.requests[0]
     assert request.resume_session_id == "s-42"
     assert "APPROVED" in request.prompt
+
+
+def test_resume_note_survives_a_crash_into_the_retry_run(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    """A resumed run that crashes must not drop the sign-off decision: the
+    retry run needs it too, or the agent redoes (or re-requests) the gated
+    work blind. The crashed attempt itself becomes SUPERSEDED, not FAILED or
+    CANCELLED, since it was replaced by a retry rather than exhausted or
+    cancelled by a human."""
+    run = _queued(session)
+    run.session_id = "s-1"
+    run.resume_pending = True
+    run.resume_note = "Sign-off decision for approval abc: APPROVED."
+    session.commit()
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [], reason=ExitReason.CRASHED, exit_code=1)
+    worker = _worker(sessions, executor, notifier, tmp_path)
+
+    assert worker.tick(NOW) is True
+
+    session.expire_all()
+    original = session.get(Run, run.id)
+    assert original is not None
+    assert original.status is RunStatus.SUPERSEDED
+    assert original.resume_pending is False
+    assert original.resume_note is None
+
+    retry = session.scalar(select(Run).where(Run.task_id == run.task_id, Run.attempt == 2))
+    assert retry is not None
+    assert retry.status is RunStatus.QUEUED
+    assert retry.resume_note == "Sign-off decision for approval abc: APPROVED."
+
+
+def test_finalize_ignores_stale_success_when_run_was_resumed_from_underneath(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    """Race: the executor exits, and before finalize() opens its session, a
+    Slack sign-off for this same run arrives via the inbound endpoint (Task
+    10), setting resume_pending/resume_note and requeuing the run. finalize()
+    must not (a) clobber that fresh resume instruction, nor (b) report
+    success / mark the task DONE for a run that is no longer actually the
+    one it thinks it finished."""
+    from aicom.domain.enums import TaskStatus
+    from aicom.executor.base import RunOutcome
+    from aicom.gate.service import request_approval
+    from aicom.inbound.app import ResolveOutcome, resolve_approval
+    from aicom.store.models import Approval
+    from aicom.store.runs import claim_next_queued
+
+    _queued(session)
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    worker = _worker(sessions, executor, notifier, tmp_path)
+
+    claimed = claim_next_queued(session, worker_id="w1", now=NOW)
+    assert claimed is not None
+    session.commit()
+    request = worker._build_request(session, claimed)
+    session.commit()
+
+    # Mid-run the agent parks the run awaiting sign-off.
+    request_approval(
+        session,
+        run_id=claimed.id,
+        kind="spend",
+        proposal="Buy X for $20. Alt: free tier. Reversible: yes.",
+        payload={"amount_usd": 20},
+        now=NOW,
+    )
+    session.commit()
+    approval = session.scalar(select(Approval).where(Approval.run_id == claimed.id))
+    assert approval is not None
+
+    # Before this worker's finalize() runs for the now-exited process, the
+    # operator approves via Slack -- a completely different code path
+    # requeues the run with a fresh resume_pending/resume_note.
+    outcome_resolve = resolve_approval(
+        session, nonce=approval.nonce, decided_by="U1", approved=True, now=NOW
+    )
+    session.commit()
+    assert outcome_resolve is ResolveOutcome.REQUEUED
+
+    # The executor's process already exited (e.g. it terminated normally
+    # right after requesting approval) by the time finalize() gets to run.
+    outcome = RunOutcome(reason=ExitReason.COMPLETED, exit_code=0, session_id="s-99")
+    fresh = session.get(Run, claimed.id, populate_existing=True)
+    assert fresh is not None
+    worker.finalize(session, fresh, outcome, request, NOW)
+    session.commit()
+
+    session.expire_all()
+    refreshed = session.get(Run, claimed.id)
+    assert refreshed is not None
+    assert refreshed.status is RunStatus.QUEUED
+    assert refreshed.resume_pending is True
+    assert refreshed.resume_note is not None
+    assert "APPROVED" in refreshed.resume_note
+    assert refreshed.task.status is not TaskStatus.DONE
+    assert len(notifier.reports) == 0
+
+
+def test_heartbeat_advances_during_a_silent_execution(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    """A run that emits no stream events for a while must still look alive
+    to Task 13's stale-run sweeper: a background ticker, not on_event, is
+    what keeps the heartbeat fresh."""
+    import time
+
+    run = _queued(session)
+
+    class SlowSilentExecutor(FakeExecutor):
+        def run(self, req, on_event):  # type: ignore[no-untyped-def]
+            time.sleep(0.2)
+            return super().run(req, on_event)
+
+    executor, notifier = SlowSilentExecutor(), FakeNotifier()
+    executor.queue(run.id, [])  # no events at all
+
+    worker = _worker(sessions, executor, notifier, tmp_path)
+    worker._settings.worker_heartbeat_seconds = 0.05
+
+    before = datetime.now(UTC)
+    assert worker.tick(NOW) is True
+    after = datetime.now(UTC)
+
+    session.expire_all()
+    refreshed = session.get(Run, run.id)
+    assert refreshed is not None
+    assert refreshed.heartbeat_at is not None
+    # claim_next_queued stamps the pinned NOW; only a real mid-execution
+    # ticker tick would advance it to real wall-clock time in between.
+    assert refreshed.heartbeat_at != NOW
+    assert before <= refreshed.heartbeat_at <= after

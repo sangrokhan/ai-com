@@ -9,6 +9,7 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
+    SUPERSEDED = "superseded"
 
 
 class TaskStatus(StrEnum):

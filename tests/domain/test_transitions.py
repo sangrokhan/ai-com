@@ -11,6 +11,7 @@ from aicom.domain.transitions import IllegalTransition, assert_transition, can_t
         (RunStatus.RUNNING, RunStatus.SUCCEEDED),
         (RunStatus.RUNNING, RunStatus.AWAITING_APPROVAL),
         (RunStatus.RUNNING, RunStatus.QUEUED),  # usage-limit requeue, stale recovery
+        (RunStatus.RUNNING, RunStatus.SUPERSEDED),  # replaced by a retry, not cancelled
         (RunStatus.AWAITING_APPROVAL, RunStatus.QUEUED),  # resume after sign-off
         (RunStatus.AWAITING_APPROVAL, RunStatus.CANCELLED),
     ],
@@ -43,6 +44,7 @@ def test_terminal_states_have_no_successors() -> None:
         RunStatus.FAILED,
         RunStatus.TIMED_OUT,
         RunStatus.CANCELLED,
+        RunStatus.SUPERSEDED,
     }
     for status in TERMINAL:
         assert all(not can_transition(status, other) for other in RunStatus)
