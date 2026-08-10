@@ -13,6 +13,8 @@ class ApprovalView:
     task_title: str
     proposal: str
     payload: dict
+    slack_channel: str | None = None
+    slack_ts: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
