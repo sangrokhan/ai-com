@@ -6,10 +6,11 @@ from enum import StrEnum
 from fastapi import FastAPI, Request, Response
 from sqlalchemy.orm import Session, sessionmaker
 
-from aicom.config import Settings
+from aicom.config import Settings, load_settings
 from aicom.domain.enums import RunStatus
 from aicom.inbound.verify import verify_slack_signature
 from aicom.store.approvals import consume_nonce
+from aicom.store.db import make_engine, session_factory
 from aicom.store.models import Run
 from aicom.store.runs import transition
 
@@ -161,4 +162,22 @@ def create_app(sessions: sessionmaker[Session], settings: Settings) -> FastAPI:
             session.commit()
         return Response(status_code=200)
 
+    from aicom.api.routes import make_router
+
+    app.include_router(make_router(sessions))
+
     return app
+
+
+def app_factory() -> FastAPI:
+    """Zero-argument entry point for `uvicorn aicom.inbound.app:app_factory --factory`.
+
+    `create_app` needs a session factory and settings, which uvicorn's
+    `--factory` calling convention has no way to supply -- it always calls
+    the target with no arguments. This wrapper builds both from the process
+    environment (via `AICOM_*` settings) so the ASGI server can still be
+    pointed at a plain import path.
+    """
+    settings = load_settings()
+    sessions = session_factory(make_engine(settings.database_url))
+    return create_app(sessions, settings)

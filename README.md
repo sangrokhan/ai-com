@@ -1,1 +1,65 @@
 # ai-com
+
+Background agent orchestrator. Agents run autonomously; the operator signs off only on
+money and publication.
+
+## Run it
+
+```bash
+docker run -d -e POSTGRES_PASSWORD=aicom -e POSTGRES_USER=aicom -e POSTGRES_DB=aicom \
+  -p 5432:5432 postgres:16-alpine
+alembic upgrade head
+uvicorn aicom.inbound.app:app_factory --factory --host 127.0.0.1   # HTTP: API + Slack interactions
+python -m aicom.main                                                # worker + sweeper loop
+```
+
+Point the Slack app's Interactivity Request URL at `POST /slack/interactions`.
+
+## Configuration
+
+All settings use the `AICOM_` env prefix — see `src/aicom/config.py`.
+Secrets referenced from `agent.mcp_config` resolve from `AICOM_SECRET_<SLUG>` env vars.
+
+## HTTP API
+
+Mounted on the same FastAPI app as the Slack webhook (`src/aicom/api/routes.py`):
+
+- `POST /tasks` — create a task and its first queued run, in one transaction.
+- `GET /tasks` — list tasks.
+- `GET /runs/{run_id}` — a single run's status.
+- `GET /runs/{run_id}/events` — a run's event transcript, ordered by `seq`.
+- `GET /approvals` — pending sign-off requests.
+
+### These endpoints have no authentication
+
+`/tasks`, `/runs/*`, and `/approvals` are **not authenticated**. Unlike
+`POST /slack/interactions` (which verifies the Slack request signature and checks an
+approver allowlist before doing anything), anyone who can reach this port can queue
+work for an autonomous agent, or read run transcripts and pending approvals.
+
+This is a deliberate scope decision for this task, not an oversight:
+
+- No bespoke auth scheme has been invented or added here.
+- **You must not expose this port to anything other than trusted operators.** Bind it
+  to `127.0.0.1` (see the `--host 127.0.0.1` above) or a private network, and put a
+  real access-control layer (VPN, reverse proxy with SSO, mTLS, cloud IAM, etc.) in
+  front of it before running it anywhere reachable by untrusted clients. Do not put it
+  on the public internet as-is.
+- The money/publication safety property of this system lives entirely in the Slack
+  approval flow, which *is* verified end-to-end. The REST API can queue arbitrary
+  agent work but still cannot itself approve a gated spend or publish action — those
+  still require a signed, allowlisted Slack interaction.
+
+`POST /tasks` also validates that `agent_id` refers to an existing, enabled `Agent`
+row and returns `404`/`400` otherwise, so a typo'd or disabled agent id fails loudly
+at request time instead of silently queuing a run nothing will ever pick up.
+
+## Worker + sweeper loop
+
+`python -m aicom.main` runs `aicom.main.run_worker_forever`, a single long-lived loop
+that each iteration: recovers stale runs, sends due approval reminders, and lets the
+worker claim and execute one queued run. An unhandled exception from any of those
+steps is logged and the loop continues on the next iteration rather than exiting —
+there is no process supervisor restarting this service, so a single bad iteration
+(e.g. a transient DB error) must not take down the ability to ever again pick up
+queued work or Slack reminders.
