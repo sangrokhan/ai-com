@@ -55,3 +55,21 @@ def test_garbage_timestamp_rejected() -> None:
     assert not verify_slack_signature(
         signing_secret=SECRET, timestamp="nope", body=BODY, signature="v0=abc", now=NOW
     )
+
+
+def test_replay_from_the_future_outside_five_minute_window_rejected() -> None:
+    """The window must fail closed in both directions: a timestamp claiming to
+    be from six minutes in the future is just as suspect as a stale replay."""
+    future = NOW + timedelta(minutes=6)
+    ts = str(int(future.timestamp()))
+    assert not verify_slack_signature(
+        signing_secret=SECRET, timestamp=ts, body=BODY, signature=_sign(ts, BODY), now=NOW
+    )
+
+
+def test_empty_signing_secret_rejects_an_otherwise_well_formed_request() -> None:
+    """An empty secret must fail closed, never accept everything."""
+    ts = str(int(NOW.timestamp()))
+    assert not verify_slack_signature(
+        signing_secret="", timestamp=ts, body=BODY, signature=_sign(ts, BODY, secret=""), now=NOW
+    )

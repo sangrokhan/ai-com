@@ -1,5 +1,7 @@
 import json
+import logging
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from fastapi import FastAPI, Request, Response
 from sqlalchemy.orm import Session, sessionmaker
@@ -8,19 +10,33 @@ from aicom.config import Settings
 from aicom.domain.enums import RunStatus
 from aicom.inbound.verify import verify_slack_signature
 from aicom.store.approvals import consume_nonce
+from aicom.store.models import Run
 from aicom.store.runs import transition
+
+logger = logging.getLogger(__name__)
+
+
+class ResolveOutcome(StrEnum):
+    """Distinguishes the three ways resolving a nonce can go, so a caller can
+    tell a benign duplicate-click no-op apart from a genuine stall -- without
+    that distinction ever reaching the HTTP response, which would hand an
+    attacker an oracle for probing nonce validity."""
+
+    NOT_FOUND = "not_found"  # unknown or already-consumed nonce: a safe no-op
+    REQUEUED = "requeued"  # consumed and the parked run was requeued
+    REQUEUE_FAILED = "requeue_failed"  # consumed but the run was not requeued
 
 
 def resolve_approval(
     session: Session, *, nonce: str, decided_by: str, approved: bool, now: datetime
-) -> bool:
+) -> ResolveOutcome:
     approval = consume_nonce(
         session, nonce=nonce, decided_by=decided_by, approved=approved, now=now
     )
     if approval is None:
-        return False
+        return ResolveOutcome.NOT_FOUND
     note = "APPROVED" if approved else "REJECTED"
-    transition(
+    requeued = transition(
         session,
         approval.run_id,
         RunStatus.AWAITING_APPROVAL,
@@ -28,7 +44,25 @@ def resolve_approval(
         resume_pending=True,
         resume_note=f"Sign-off decision for approval {approval.id}: {note}.",
     )
-    return True
+    if not requeued:
+        # The nonce is already burned and the approval already marked
+        # APPROVED/REJECTED (consume_nonce is a single atomic UPDATE that has
+        # already committed to that outcome), but the run was not in
+        # AWAITING_APPROVAL at that moment, so it was never requeued. That
+        # run is now parked forever unless an operator intervenes -- this
+        # must never happen silently.
+        run = session.get(Run, approval.run_id, populate_existing=True)
+        actual_status = run.status if run is not None else "<run not found>"
+        logger.error(
+            "approval %s consumed (approved=%s) but run %s was not requeued: "
+            "expected status AWAITING_APPROVAL, actual status %s",
+            approval.id,
+            approved,
+            approval.run_id,
+            actual_status,
+        )
+        return ResolveOutcome.REQUEUE_FAILED
+    return ResolveOutcome.REQUEUED
 
 
 def _collect_nonces(payload: dict) -> list[tuple[str, bool]]:
@@ -43,23 +77,37 @@ def _collect_nonces(payload: dict) -> list[tuple[str, bool]]:
     nonces: list[tuple[str, bool]] = []
     for action in payload.get("actions", []):
         if not isinstance(action, dict):
+            logger.warning("skipping malformed action (not an object): %r", action)
             continue
         action_id = action.get("action_id")
         try:
             value = json.loads(action.get("value") or "{}")
         except (TypeError, ValueError):
+            logger.warning("skipping action %r with unparseable value: %r", action_id, action)
             continue
         if not isinstance(value, dict):
+            logger.warning(
+                "skipping action %r whose value did not decode to an object: %r",
+                action_id,
+                action,
+            )
             continue
         if action_id == "approve_all":
             raw_nonces = value.get("nonces", [])
             if isinstance(raw_nonces, list):
                 nonces += [(n, True) for n in raw_nonces if isinstance(n, str)]
+            else:
+                logger.warning("skipping approve_all action with non-list nonces: %r", action)
         elif action_id in {"approve", "reject"}:
             nonce = value.get("nonce")
             if isinstance(nonce, str):
                 nonces.append((nonce, action_id == "approve"))
-        # any other action_id is unrecognized and is silently ignored
+            else:
+                logger.warning(
+                    "skipping action %r with missing/invalid nonce: %r", action_id, action
+                )
+        else:
+            logger.warning("skipping unrecognized action_id %r: %r", action_id, action)
     return nonces
 
 
@@ -101,9 +149,15 @@ def create_app(sessions: sessionmaker[Session], settings: Settings) -> FastAPI:
 
         with sessions() as session:
             for nonce, approved in nonces:
-                resolve_approval(
+                outcome = resolve_approval(
                     session, nonce=nonce, decided_by=user_id, approved=approved, now=now
                 )
+                if outcome is not ResolveOutcome.REQUEUED:
+                    logger.warning(
+                        "nonce resolution for user %s did not requeue a run: outcome=%s",
+                        user_id,
+                        outcome,
+                    )
             session.commit()
         return Response(status_code=200)
 
