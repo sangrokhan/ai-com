@@ -48,6 +48,14 @@ class Worker:
         self._notifier = notifier
         self._settings = settings
         self._worker_id = worker_id
+        # Whether the run actually had resume_pending set at the moment its
+        # RunRequest was built, keyed by run_id. RunRequest.resume_session_id
+        # is a lossy proxy for this (it's None whenever the run has no stored
+        # session_id yet, even if resume_pending was True — e.g. a run parked
+        # before the executor ever reported a session_id, then approved) so
+        # finalize() must not re-derive "did this execution consume a
+        # resume" from the request; it reads the fact captured here instead.
+        self._resume_flags: dict[uuid.UUID, bool] = {}
 
     def tick(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(UTC)
@@ -80,6 +88,8 @@ class Worker:
         mcp_config, env = resolve_secrets(agent.mcp_config, _lookup_secret)
         run.workspace_path = str(workspace)
         allowed = tuple(agent.allowed_tools) + (GATE_TOOL,)
+        # Capture the fact directly, not a proxy for it (see _resume_flags).
+        self._resume_flags[run.id] = run.resume_pending
         return RunRequest(
             run_id=run.id,
             prompt=build_prompt(run.task.title, run.task.goal, run.resume_note),
@@ -150,7 +160,8 @@ class Worker:
         # operator approving a gate request the run just made, moments before
         # this finalize() runs — must not be confused with it, or the fresh
         # resume_pending/resume_note that raced in gets clobbered below.
-        consumed_resume = request.resume_session_id is not None
+        # Popped (not just read) so a stale entry can never leak across runs.
+        consumed_resume = self._resume_flags.pop(run.id, False)
 
         run.session_id = outcome.session_id or run.session_id
         run.cost_usd = outcome.cost_usd
@@ -176,19 +187,17 @@ class Worker:
             self._handle_failure(session, run, outcome, now, consumed_resume=consumed_resume)
             return
 
-        sha = commit_run_artifacts(
-            session,
-            run_id=run.id,
-            workspace=request.workspace,
-            repo=self._settings.artifact_repo_path,
-            label=f"{run.task.agent.name}/{run.task.title}",
-        )
         # Fold the resume-flag clear into the same conditional UPDATE as the
         # status transition: it only takes effect if the run was still
         # RUNNING, i.e. still ours. If it wasn't — because the run moved out
         # from under us (the race above) — applied is False and this method
-        # takes NO further side effects: no task status flip, no success
-        # report to Slack for a run that isn't actually done.
+        # takes NO further side effects: no artifact commit, no task status
+        # flip, no success report to Slack for a run that isn't actually
+        # done. The transition MUST be checked before commit_run_artifacts
+        # runs, not after: commit_run_artifacts makes an irreversible git
+        # commit and stages Artifact rows for this same session's commit, so
+        # calling it before checking `applied` would double-commit artifacts
+        # the next time this same run_id actually succeeds for real.
         resume_clear = {"resume_pending": False, "resume_note": None} if consumed_resume else {}
         applied = transition(
             session, run.id, RunStatus.RUNNING, RunStatus.SUCCEEDED, ended_at=now, **resume_clear
@@ -201,6 +210,13 @@ class Worker:
                 run.id,
             )
             return
+        sha = commit_run_artifacts(
+            session,
+            run_id=run.id,
+            workspace=request.workspace,
+            repo=self._settings.artifact_repo_path,
+            label=f"{run.task.agent.name}/{run.task.title}",
+        )
         run.task.status = TaskStatus.DONE
         self._notifier.send_run_report(
             RunReport(
@@ -258,7 +274,7 @@ class Worker:
             # scan over a task's runs can tell "gave up" from "was replaced
             # by a retry" from "a human cancelled it". exit_reason (set above
             # in finalize) still records why this particular attempt ended.
-            transition(
+            applied = transition(
                 session,
                 run.id,
                 RunStatus.RUNNING,
@@ -266,6 +282,17 @@ class Worker:
                 ended_at=now,
                 **resume_clear,
             )
+            if not applied:
+                # Same race as the success path: the run moved out from
+                # under us (e.g. a Slack sign-off already re-queued it)
+                # before we got here. Creating a retry row now would leave
+                # TWO queued runs for one task, duplicating the work.
+                logger.warning(
+                    "run %s crashed but was no longer RUNNING at finalize "
+                    "time; skipping retry-run creation",
+                    run.id,
+                )
+                return
             session.add(
                 Run(
                     id=uuid.uuid4(),
@@ -283,7 +310,19 @@ class Worker:
             )
             return
         target = RunStatus.TIMED_OUT if outcome.reason is ExitReason.TIMEOUT else RunStatus.FAILED
-        transition(session, run.id, RunStatus.RUNNING, target, ended_at=now, **resume_clear)
+        applied = transition(
+            session, run.id, RunStatus.RUNNING, target, ended_at=now, **resume_clear
+        )
+        if not applied:
+            # Again the same race: telling the operator the task failed
+            # while the run is actually queued to resume would be a false
+            # report.
+            logger.warning(
+                "run %s exhausted retries but was no longer RUNNING at "
+                "finalize time; skipping failure side effects",
+                run.id,
+            )
+            return
         run.task.status = TaskStatus.FAILED
         self._notifier.send_run_report(
             RunReport(
