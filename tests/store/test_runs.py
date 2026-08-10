@@ -1,13 +1,10 @@
 import uuid
-from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
-import pytest
-from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from aicom.domain.enums import RunStatus
-from aicom.store.models import Agent, Run, Task
+from aicom.store.models import Run, Task
 from aicom.store.runs import (
     claim_next_queued,
     stale_running_runs,
@@ -17,19 +14,6 @@ from aicom.store.runs import (
 from tests.store.test_models import make_agent
 
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
-
-
-@pytest.fixture(autouse=True)
-def _clean_run_tables(session: Session) -> Iterator[None]:
-    """The shared `session` fixture only rolls back uncommitted work, but these
-    tests call session.commit(). Without this, committed rows from one test
-    (e.g. a RUNNING run with a heartbeat) leak into a later test's exact-match
-    assertions against a real, session-scoped Postgres container."""
-    yield
-    session.execute(delete(Run))
-    session.execute(delete(Task))
-    session.execute(delete(Agent))
-    session.commit()
 
 
 def _queued_run(session: Session) -> Run:

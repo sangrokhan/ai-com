@@ -1,12 +1,27 @@
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import Engine
+from sqlalchemy import Engine, delete
 from sqlalchemy.orm import Session, sessionmaker
 from testcontainers.postgres import PostgresContainer
 
 from aicom.store.db import make_engine, session_factory
-from aicom.store.models import Base
+from aicom.store.models import (
+    Agent,
+    Approval,
+    Artifact,
+    Base,
+    Event,
+    Run,
+    SpendLedger,
+    SystemState,
+    Task,
+)
+
+# Child-to-parent FK order, so deletes never violate a foreign key constraint.
+# SpendLedger -> Approval, Agent; Event/Approval/Artifact -> Run; Run -> Task;
+# Task -> Agent, Task (self-referential parent_task_id); SystemState has no FK.
+_TABLES_IN_DELETE_ORDER = (SpendLedger, Event, Approval, Artifact, Run, Task, Agent, SystemState)
 
 
 @pytest.fixture(scope="session")
@@ -28,3 +43,11 @@ def session(sessions: sessionmaker[Session]) -> Iterator[Session]:
     with sessions() as s:
         yield s
         s.rollback()
+        # `s.rollback()` only undoes uncommitted work. Tests exercising
+        # conditional-UPDATE transitions and claim semantics must commit to
+        # observe cross-transaction behavior (e.g. SKIP LOCKED), so committed
+        # rows would otherwise leak into later tests sharing this session-scoped
+        # engine/container. Truncate everything after every test instead.
+        for model in _TABLES_IN_DELETE_ORDER:
+            s.execute(delete(model))
+        s.commit()
