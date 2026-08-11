@@ -15,6 +15,76 @@ python -m aicom.main                                                # worker + s
 
 Point the Slack app's Interactivity Request URL at `POST /slack/interactions`.
 
+## Docker
+
+A `Dockerfile` and `docker-compose.yml` package both processes (they share one
+image; the container command picks which one runs) plus a one-shot migration
+job, on top of `postgres:16-alpine`.
+
+### Before you start: Claude authentication
+
+The worker container spawns the real `claude` CLI as a subprocess (see
+`src/aicom/executor/cli.py`). This project runs on a **personal Claude
+subscription**, not an API key, so no credential is baked into the image and
+no API-key environment variable exists as a workaround. Instead:
+
+1. Log in on the **host** first: run `claude` (or `claude login`) locally
+   until you have an authenticated session under `~/.claude`.
+2. `docker-compose.yml` bind-mounts that host directory,
+   `${HOME}/.claude`, into the worker container at `/home/aicom/.claude`.
+3. **This directory contains live session credentials. Never commit it, copy
+   it into an image, or add it to a volume that leaves your machine.** It
+   already exists on your host outside this repo, so nothing extra needs to
+   be gitignored for it, but do not `COPY` it into the `Dockerfile`.
+
+If `~/.claude` doesn't exist or isn't logged in yet, the worker container
+will start but every run will fail at the `claude` subprocess step.
+
+### Bring the stack up
+
+```bash
+cp .env.example .env
+# edit .env: at minimum set POSTGRES_PASSWORD, AICOM_DATABASE_URL to match,
+# AICOM_SLACK_BOT_TOKEN, AICOM_SLACK_SIGNING_SECRET, AICOM_SLACK_APPROVER_IDS.
+
+docker compose up -d
+```
+
+This starts `postgres`, runs `migrate` (`alembic upgrade head`) once
+`postgres` is healthy, then starts `api` and `worker` once `migrate` exits
+successfully.
+
+### Running migrations again
+
+The `migrate` service only runs once at startup. To re-run migrations later
+(e.g. after pulling new versions):
+
+```bash
+docker compose run --rm migrate
+```
+
+### Logs
+
+```bash
+docker compose logs -f api worker
+```
+
+### Tear down
+
+```bash
+docker compose down -v   # -v also drops the named postgres/workspaces/artifacts volumes
+```
+
+### Not hardened for public exposure
+
+The `api` service publishes its port bound to `127.0.0.1` only
+(`127.0.0.1:8000:8000`) — leave it that way unless something else in front of
+it provides real access control. As above, `/tasks`, `/runs/*`, and
+`/approvals` have no authentication; only `POST /slack/interactions` is
+signature-verified. Do not change the port binding to expose this to
+anything other than trusted operators or a network you've put auth in front
+of.
+
 ## Configuration
 
 All settings use the `AICOM_` env prefix — see `src/aicom/config.py`.

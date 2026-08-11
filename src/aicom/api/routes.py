@@ -19,6 +19,10 @@ class CreateTask(BaseModel):
 def make_router(sessions: sessionmaker[Session]) -> APIRouter:
     router = APIRouter()
 
+    @router.get("/health")
+    def health() -> dict:
+        return {"status": "ok"}
+
     @router.post("/tasks", status_code=201)
     def create_task(body: CreateTask) -> dict:
         with sessions() as session:

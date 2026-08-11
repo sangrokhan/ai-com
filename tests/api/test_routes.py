@@ -57,6 +57,12 @@ def test_get_run_events_returns_ordered_payloads(
     assert [e["seq"] for e in response.json()] == [0, 1]
 
 
+def test_health_returns_ok(sessions: sessionmaker[Session]) -> None:
+    response = _client(sessions).get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_unknown_run_returns_404(sessions: sessionmaker[Session]) -> None:
     response = _client(sessions).get(f"/runs/{uuid.uuid4()}")
     assert response.status_code == 404
