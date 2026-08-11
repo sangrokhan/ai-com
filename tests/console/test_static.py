@@ -36,3 +36,24 @@ def test_missing_bundle_does_not_break_the_app(
     client = TestClient(create_app(sessions, _settings(tmp_path / "absent")))
     client.post("/auth/login", json={"password": PASSWORD})
     assert client.get("/console/state").status_code == 200
+
+
+def test_root_serves_the_built_bundle(sessions: sessionmaker[Session], tmp_path: Path) -> None:
+    marker = "TASK-4-BUNDLE-MARKER-4f8c2e"
+    (tmp_path / "index.html").write_text(f"<!doctype html><title>{marker}</title>")
+    client = TestClient(create_app(sessions, _settings(tmp_path)))
+    client.post("/auth/login", json={"password": PASSWORD})
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert marker in response.text
+
+
+def test_root_without_a_bundle_does_not_500(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    client = TestClient(create_app(sessions, _settings(tmp_path / "absent")))
+    client.post("/auth/login", json={"password": PASSWORD})
+
+    response = client.get("/")
+    assert response.status_code < 500
