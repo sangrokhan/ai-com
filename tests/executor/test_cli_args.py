@@ -30,6 +30,13 @@ def test_argv_pins_stream_json_whitelist_and_workspace(tmp_path: Path) -> None:
     assert argv[argv.index("--mcp-config") + 1] == str(tmp_path / "mcp.json")
     assert "--resume" not in argv
     assert argv[-1] == "research widgets"
+    # `--mcp-config` (like `--allowedTools` and `--add-dir`) is a variadic CLI
+    # option: with no `--` to stop it, it greedily swallows the prompt that
+    # follows as another config value instead of leaving it as the positional
+    # prompt argument. Pin the separator immediately before the prompt, not
+    # just "present somewhere", so moving or dropping it fails this test.
+    assert argv[-2] == "--"
+    assert argv.index("--") > argv.index("--mcp-config") + 1
 
 
 def test_resume_flag_present_only_when_session_id_given(tmp_path: Path) -> None:
@@ -37,3 +44,6 @@ def test_resume_flag_present_only_when_session_id_given(tmp_path: Path) -> None:
         _req(tmp_path, resume="sess-77"), binary="claude", mcp_config_path=tmp_path / "mcp.json"
     )
     assert argv[argv.index("--resume") + 1] == "sess-77"
+    assert argv[-2] == "--"
+    assert argv[-1] == "research widgets"
+    assert argv.index("--") > argv.index("--mcp-config") + 1
