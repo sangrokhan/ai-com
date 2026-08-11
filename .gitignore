@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .env
+
+# Session scratch (SDD ledgers, agent reports)
+.superpowers/
