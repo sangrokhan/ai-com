@@ -20,8 +20,13 @@ _TERMINAL_FAILURE = (RunStatus.FAILED, RunStatus.TIMED_OUT)
 
 # Every status a run can end up in once it has stopped changing. Used to find
 # the most recently finished run for an agent so a stale failure can be
-# reported, without requiring `ended_at` to be set (worker crashes and some
-# test fixtures leave it null even though the run is done).
+# reported, without requiring `ended_at` to be set (worker crashes leave it
+# null even though the run is done). Ordered by `started_at` rather than
+# `ended_at`: every run that ever executed has a `started_at`, set by
+# `claim_next_queued` the moment a worker claims it (src/aicom/store/runs.py),
+# so a crashed run with no `ended_at` still sorts correctly relative to a
+# stamped success. `ended_at` would rank any timestamped row above any null
+# row regardless of true recency.
 _TERMINAL_STATUSES = (
     RunStatus.SUCCEEDED,
     RunStatus.FAILED,
@@ -115,7 +120,7 @@ def _latest_terminal_failed(session: Session, agent_id: uuid.UUID) -> bool:
         select(Run.status)
         .join(Task, Run.task_id == Task.id)
         .where(Task.agent_id == agent_id, Run.status.in_(_TERMINAL_STATUSES))
-        .order_by(Run.ended_at.desc().nulls_last())
+        .order_by(Run.started_at.desc().nulls_last())
         .limit(1)
     )
     status = session.scalar(stmt)

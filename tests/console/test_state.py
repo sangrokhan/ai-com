@@ -21,6 +21,30 @@ def _task_with_run(session: Session, agent_id: uuid.UUID, status: RunStatus) -> 
     return run
 
 
+def _task_with_run_at(
+    session: Session,
+    agent_id: uuid.UUID,
+    status: RunStatus,
+    *,
+    started_at: datetime | None,
+    ended_at: datetime | None,
+) -> Run:
+    task = Task(id=uuid.uuid4(), agent_id=agent_id, title="t", goal="g")
+    session.add(task)
+    session.flush()
+    run = Run(
+        id=uuid.uuid4(),
+        task_id=task.id,
+        attempt=1,
+        status=status,
+        started_at=started_at,
+        ended_at=ended_at,
+    )
+    session.add(run)
+    session.flush()
+    return run
+
+
 def test_agent_with_no_runs_is_idle(session: Session) -> None:
     agent = make_agent(session)
     session.commit()
@@ -149,6 +173,66 @@ def test_disabled_agents_are_excluded(session: Session) -> None:
     session.commit()
 
     assert build_snapshot(session, now=NOW).agents == []
+
+
+def test_newer_success_with_null_ended_at_is_not_reported_failed(
+    session: Session,
+) -> None:
+    # Older FAILED run has a stamped ended_at; the newer SUCCEEDED run is a
+    # crash-free finish whose ended_at hasn't been written yet. Ordering by
+    # ended_at would rank the stamped FAILED row above the un-stamped, truly
+    # newer SUCCEEDED row and misreport "failed". started_at distinguishes them.
+    agent = make_agent(session)
+    _task_with_run_at(
+        session,
+        agent.id,
+        RunStatus.FAILED,
+        started_at=NOW - timedelta(hours=2),
+        ended_at=NOW - timedelta(hours=1, minutes=50),
+    )
+    _task_with_run_at(
+        session,
+        agent.id,
+        RunStatus.SUCCEEDED,
+        started_at=NOW - timedelta(minutes=10),
+        ended_at=None,
+    )
+    session.commit()
+
+    view = next(
+        a for a in build_snapshot(session, now=NOW).agents if a.agent_id == str(agent.id)
+    )
+    assert view.status != "failed"
+
+
+def test_newer_crash_failure_with_null_ended_at_is_reported_failed(
+    session: Session,
+) -> None:
+    # Older SUCCEEDED run has a stamped ended_at; the newer FAILED run is a
+    # crash whose ended_at never got written. Ordering by ended_at would rank
+    # the stamped SUCCEEDED row above the un-stamped, truly newer FAILED row
+    # and mask the real failure. started_at distinguishes them.
+    agent = make_agent(session)
+    _task_with_run_at(
+        session,
+        agent.id,
+        RunStatus.SUCCEEDED,
+        started_at=NOW - timedelta(hours=2),
+        ended_at=NOW - timedelta(hours=1, minutes=50),
+    )
+    _task_with_run_at(
+        session,
+        agent.id,
+        RunStatus.FAILED,
+        started_at=NOW - timedelta(minutes=10),
+        ended_at=None,
+    )
+    session.commit()
+
+    view = next(
+        a for a in build_snapshot(session, now=NOW).agents if a.agent_id == str(agent.id)
+    )
+    assert view.status == "failed"
 
 
 def test_snapshot_is_stable_for_unchanged_data(session: Session) -> None:
