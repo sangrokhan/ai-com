@@ -15,6 +15,7 @@ dependencies = [
     # mcp.server.fastmcp (e.g. to mcp.server.mcpserver.MCPServer in 2.x).
     "mcp>=1.0,<2.0",
     "pydantic-settings>=2.2",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]
@@ -45,3 +46,7 @@ markers = ["smoke: hits the real claude binary; skipped in CI"]
 [tool.mypy]
 strict = true
 files = ["src/aicom/domain"]
+
+[[tool.mypy.overrides]]
+module = "croniter.*"
+ignore_missing_imports = true
