@@ -34,13 +34,19 @@ class Scheduler:
         with self._sessions() as session:
             for schedule in due_schedules(session, now=now):
                 try:
-                    if self._process(session, schedule, now):
-                        created += 1
+                    fired = self._process(session, schedule, now)
                     session.commit()
                 except Exception:
                     # One schedule must never starve the rest.
                     session.rollback()
                     logger.exception("schedule %s failed to process", schedule.id)
+                    continue
+                # Only count a firing once the transaction that created it has
+                # actually landed. If the commit above had failed, the task
+                # and run rows would have rolled back with it, and reporting
+                # them as created would lie to the caller.
+                if fired:
+                    created += 1
         return created
 
     def _process(self, session: Session, schedule: Schedule, now: datetime) -> bool:
@@ -49,9 +55,18 @@ class Scheduler:
             upcoming = next_fire(schedule.cron, schedule.timezone, now)
         except InvalidCron as exc:
             disable(session, schedule.id, reason=str(exc), now=now)
-            self._notifier.send_system_notice(
-                f"Schedule '{schedule.name}' disabled: {exc}"
-            )
+            # Commit the disable before notifying: a notifier failure must
+            # not undo the disable, or the same broken schedule gets retried
+            # (and fails to notify) on every subsequent tick forever.
+            session.commit()
+            try:
+                self._notifier.send_system_notice(
+                    f"Schedule '{schedule.name}' disabled: {exc}"
+                )
+            except Exception:
+                logger.exception(
+                    "schedule %s: disabled but failed to notify", schedule.id
+                )
             return False
 
         if not schedule.agent.enabled:

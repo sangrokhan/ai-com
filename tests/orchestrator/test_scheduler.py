@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -124,6 +125,19 @@ def test_broken_cron_disables_the_schedule_and_notifies(
     assert refreshed.enabled is False
     assert len(notifier.notices) == 1
     assert schedule.name in notifier.notices[0]
+    assert len(list(session.scalars(select(Task).where(Task.schedule_id == schedule.id)))) == 0
+    assert (
+        len(
+            list(
+                session.scalars(
+                    select(Run).join(Task, Run.task_id == Task.id).where(
+                        Task.schedule_id == schedule.id
+                    )
+                )
+            )
+        )
+        == 0
+    )
 
 
 def test_a_disabled_agent_skips_without_disabling_the_schedule(
@@ -140,6 +154,35 @@ def test_a_disabled_agent_skips_without_disabling_the_schedule(
     assert refreshed is not None
     assert refreshed.enabled is True
     assert refreshed.last_skip_reason == "agent disabled"
+    # The clock advances on a skip too: this schedule must not accumulate an
+    # overdue slot behind a disabled agent.
+    assert refreshed.next_due_at > NOW
+
+
+def test_losing_the_claim_race_does_not_double_fire(
+    sessions: sessionmaker[Session],
+    session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A due schedule whose slot is won by a competing scheduler instance:
+    # claim_firing's conditional UPDATE observes a mismatch and reports
+    # failure. Simulated deterministically (a genuine two-connection race is
+    # not reproducible in a single-threaded test) by making the real
+    # claim_firing behave exactly as it would on a lost race: it always
+    # returns False. If the "if not claim_firing(...): return False" check
+    # in scheduler.py were ever dropped, this schedule would still get
+    # processed and this test would fail on the task-row assertion below —
+    # that's what makes it a real regression test for the check, not just
+    # for claim_firing's own return value.
+    _schedule(session, due=NOW - timedelta(minutes=1))
+    monkeypatch.setattr(
+        "aicom.orchestrator.scheduler.claim_firing", lambda *args, **kwargs: False
+    )
+
+    assert Scheduler(sessions, FakeNotifier()).tick(NOW) == 0
+
+    session.expire_all()
+    assert len(list(session.scalars(select(Task)))) == 0
 
 
 def test_one_broken_schedule_does_not_stop_the_others(
