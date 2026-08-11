@@ -180,6 +180,12 @@ def create_app(sessions: sessionmaker[Session], settings: Settings) -> FastAPI:
 
     app.include_router(make_console_router(sessions, settings))
 
+    from fastapi.staticfiles import StaticFiles
+
+    static_dir = settings.console_static_dir
+    if static_dir.is_dir():
+        app.mount("/", StaticFiles(directory=static_dir, html=True), name="console")
+
     return app
 
 

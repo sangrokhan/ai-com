@@ -4,6 +4,13 @@
 # the worker+sweeper loop. Which one runs is chosen by the container command
 # in docker-compose.yml, not by anything baked into this image.
 
+FROM node:22-slim AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm install
+COPY web ./
+RUN npm run build
+
 # ---- builder: compile the Python venv, no build toolchain kept afterwards ----
 FROM python:3.12-slim AS builder
 
@@ -52,6 +59,8 @@ COPY alembic ./alembic
 
 RUN mkdir -p /app/workspaces /app/artifacts \
     && chown -R aicom:aicom /app /home/aicom
+
+COPY --from=web /web/dist /app/web/dist
 
 USER aicom
 

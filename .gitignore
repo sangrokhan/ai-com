@@ -5,3 +5,7 @@ __pycache__/
 
 # Session scratch (SDD ledgers, agent reports)
 .superpowers/
+
+web/node_modules/
+web/dist/
+web/tsconfig.tsbuildinfo

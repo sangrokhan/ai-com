@@ -1,0 +1,24 @@
+:root { color-scheme: dark; }
+body {
+  margin: 0;
+  background: #1e2430;
+  color: #cfd6e4;
+  font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.console header { display: flex; gap: 16px; padding: 10px 14px; background: #2a3242; }
+.pending { color: #e8c468; }
+.paused { color: #6aa9e8; }
+.live { color: #6bcf7f; }
+.stale { color: #7a8699; }
+.agents { width: 100%; border-collapse: collapse; }
+.agents td { padding: 6px 10px; border-bottom: 1px solid #2a3242; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+.dot.working { background: #6bcf7f; }
+.dot.waiting { background: #e8c468; }
+.dot.failed { background: #e06c75; }
+.dot.paused { background: #6aa9e8; }
+.dot.idle { background: #7a8699; }
+.login { display: flex; flex-direction: column; gap: 10px; max-width: 260px; margin: 18vh auto; }
+.login input, .login button { padding: 8px; font: inherit; }
+.error { color: #e06c75; }
+.loading { padding: 20px; }
