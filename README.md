@@ -54,6 +54,31 @@ This is a deliberate scope decision for this task, not an oversight:
 row and returns `404`/`400` otherwise, so a typo'd or disabled agent id fails loudly
 at request time instead of silently queuing a run nothing will ever pick up.
 
+## The approval gate
+
+The `gate` MCP server (`aicom.gate.server`) is injected into every run **in code** by the
+worker — operators do not put it in `agent.mcp_config`, and an entry of that name there is
+overridden. It is the only route to a gated action.
+
+`agent.gated_tools` lists tools that exist for the agent but are reachable only through a
+signed-off approval. They must **not** also appear in `agent.allowed_tools`: that would make
+them permanently callable and silently disable the boundary, so the worker refuses to run
+such an agent, fails the run, and reports it. When a run resumes with an APPROVED decision
+whose `payload["tool"]` names a member of `gated_tools`, that one tool is added to
+`--allowedTools` for **that single execution only** — never persisted, never carried into a
+retry, a later run, or another agent. A payload naming anything outside `gated_tools` is
+refused (the payload is agent-supplied, and the operator signed off on a proposal, not on a
+tool string the agent picked). S1 ships no gated tools; the S5 agent packs plug into this.
+
+## Operations notes
+
+- **A failed Slack dispatch loses the approval's thread anchor, not the approval.** The
+  worker sends the approval message and then persists the returned channel/ts via
+  `attach_slack_ref`. If the send raises, no `slack_channel`/`slack_ts` is stored. Nothing is
+  lost — the approval row is already committed and still pending — but the sweeper's 30-minute
+  reminder then posts as a **new message** instead of threading onto the original. Expect a
+  standalone reminder rather than a thread reply after a Slack outage.
+
 ## Worker + sweeper loop
 
 `python -m aicom.main` runs `aicom.main.run_worker_forever`, a single long-lived loop
