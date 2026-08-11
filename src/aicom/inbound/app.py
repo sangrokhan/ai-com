@@ -162,6 +162,16 @@ def create_app(sessions: sessionmaker[Session], settings: Settings) -> FastAPI:
             session.commit()
         return Response(status_code=200)
 
+    from aicom.auth.middleware import AuthMiddleware
+    from aicom.auth.routes import make_auth_router
+
+    app.add_middleware(
+        AuthMiddleware,
+        secret=settings.session_secret,
+        max_age_seconds=settings.session_max_age_seconds,
+    )
+    app.include_router(make_auth_router(settings))
+
     from aicom.api.routes import make_router
 
     app.include_router(make_router(sessions))
