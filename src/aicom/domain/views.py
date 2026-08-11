@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from aicom.domain.enums import ApprovalKind, RunStatus
 
@@ -12,7 +13,7 @@ class ApprovalView:
     agent_name: str
     task_title: str
     proposal: str
-    payload: dict
+    payload: dict[str, Any]
     slack_channel: str | None = None
     slack_ts: str | None = None
 
