@@ -3,16 +3,20 @@ import { AgentTable } from "./ui/AgentTable";
 import { Login } from "./ui/Login";
 
 export function App() {
-  const { snapshot, connected, needsLogin } = useSnapshot();
+  const { snapshot, connected, needsLogin, error } = useSnapshot();
 
   if (needsLogin) return <Login />;
-  if (!snapshot) return <p className="loading">connecting…</p>;
+  if (!snapshot) {
+    // No snapshot yet: either still connecting for the first time, or the
+    // first fetch itself failed (server down / network error) -- say which.
+    return <p className="loading">{error ? `connection unhealthy: ${error}` : "connecting…"}</p>;
+  }
 
   return (
     <div className="console">
       <header>
         <span className={connected ? "live" : "stale"}>
-          {connected ? "● live" : "○ reconnecting"}
+          {connected ? "● live" : `○ ${error ?? "reconnecting"}`}
         </span>
         <span>{snapshot.agents.length} agents</span>
         {snapshot.pending_approvals > 0 && (

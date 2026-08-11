@@ -6,6 +6,7 @@ export function useSnapshot() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [connected, setConnected] = useState(false);
   const [needsLogin, setNeedsLogin] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const retry = useRef(1000);
 
   useEffect(() => {
@@ -16,13 +17,25 @@ export function useSnapshot() {
     const start = async () => {
       // Always refetch the full snapshot on (re)connect, so a missed delta
       // cannot leave the scene permanently stale.
-      const initial = await fetchSnapshot();
+      const result = await fetchSnapshot();
       if (cancelled) return;
-      if (initial === null) {
+      if (result.kind === "unauthorized") {
         setNeedsLogin(true);
         return;
       }
-      setSnapshot(initial);
+      if (result.kind === "error") {
+        // A server or network failure is not "wrong password" -- keep
+        // whatever snapshot is already on screen and say the connection is
+        // unhealthy, then retry with backoff, instead of bouncing the
+        // operator to the login form.
+        setConnected(false);
+        setError(result.detail);
+        timer = window.setTimeout(start, retry.current);
+        retry.current = Math.min(retry.current * 2, 30000);
+        return;
+      }
+      setError(null);
+      setSnapshot(result.snapshot);
 
       source = new EventSource("/console/stream");
       source.onopen = () => {
@@ -32,6 +45,7 @@ export function useSnapshot() {
       source.onmessage = (event) => setSnapshot(JSON.parse(event.data) as Snapshot);
       source.onerror = () => {
         setConnected(false);
+        setError("stream disconnected");
         source?.close();
         timer = window.setTimeout(start, retry.current);
         retry.current = Math.min(retry.current * 2, 30000);
@@ -46,5 +60,5 @@ export function useSnapshot() {
     };
   }, []);
 
-  return { snapshot, connected, needsLogin };
+  return { snapshot, connected, needsLogin, error };
 }
