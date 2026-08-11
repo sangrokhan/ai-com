@@ -71,7 +71,7 @@ for each, independently:
     next_due_at = cron.next(after=now)          # from NOW, not from the missed slot
 ```
 
-"Unfinished" means the schedule's most recent task is in a non-terminal state — its
+"Unfinished" means any of the schedule's tasks is in a non-terminal state — its
 `task.status` is `open` or `blocked`, or any of its runs is still `queued`, `running`, or
 `awaiting_approval`.
 
@@ -120,7 +120,7 @@ count is the authority, and the caller must check it before treating the firing 
 | Path | Responsibility | Notes |
 |------|----------------|-------|
 | `src/aicom/domain/cron.py` | `next_fire(cron, timezone, after) -> datetime`, `validate_cron(cron, timezone) -> None` | Pure: no I/O, no clock reads. `mypy --strict` applies |
-| `src/aicom/store/schedules.py` | `due_schedules`, `claim_firing`, `record_skip`, `latest_task_unfinished`, CRUD helpers | Conditional-update discipline as in `store/runs.py` |
+| `src/aicom/store/schedules.py` | `due_schedules`, `claim_firing`, `record_skip`, `has_unfinished_cycle`, CRUD helpers | Conditional-update discipline as in `store/runs.py` |
 | `src/aicom/orchestrator/scheduler.py` | `Scheduler(sessions, notifier)` with `tick(now) -> int` returning the number of tasks created | Per-schedule isolation as in `orchestrator/sweeper.py` |
 | `src/aicom/api/routes.py` | Schedule CRUD endpoints | Mounted on the existing router |
 | `src/aicom/main.py` | Calls `scheduler.tick()` in the existing worker loop | Alongside the sweeper |

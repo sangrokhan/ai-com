@@ -104,7 +104,12 @@ def test_record_skip_advances_the_clock_and_stores_the_reason(session: Session) 
     later = NOW + timedelta(hours=1)
 
     assert record_skip(
-        session, schedule.id, now=NOW, reason="previous cycle unfinished", next_due_at=later
+        session,
+        schedule.id,
+        observed,
+        now=NOW,
+        reason="previous cycle unfinished",
+        next_due_at=later,
     ) is True
     session.commit()
     session.refresh(schedule)
@@ -115,6 +120,35 @@ def test_record_skip_advances_the_clock_and_stores_the_reason(session: Session) 
     assert schedule.last_fired_at is None
     # The observed value is gone, so a racing caller cannot also claim it.
     assert claim_firing(session, schedule.id, observed, later) is False
+
+
+def test_record_skip_with_a_stale_observed_value_changes_nothing(session: Session) -> None:
+    schedule = _schedule(session, due=NOW - timedelta(minutes=1))
+    stale = schedule.next_due_at
+    later = NOW + timedelta(hours=1)
+
+    # Another instance already claimed (or skipped) this slot, moving the
+    # clock on. Our observed value is now stale.
+    assert claim_firing(session, schedule.id, stale, later, last_fired_at=NOW) is True
+    session.commit()
+
+    even_later = later + timedelta(hours=1)
+    assert record_skip(
+        session,
+        schedule.id,
+        stale,
+        now=NOW,
+        reason="previous cycle unfinished",
+        next_due_at=even_later,
+    ) is False
+    session.commit()
+    session.refresh(schedule)
+
+    # Nothing changed: the earlier claim_firing's writes stand untouched.
+    assert schedule.next_due_at == later
+    assert schedule.last_skipped_at is None
+    assert schedule.last_skip_reason is None
+    assert schedule.last_fired_at == NOW
 
 
 def test_disable_records_the_reason_and_stops_it_being_due(session: Session) -> None:

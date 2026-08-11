@@ -70,23 +70,33 @@ class Scheduler:
             return False
 
         if not schedule.agent.enabled:
-            record_skip(
+            if not record_skip(
                 session,
                 schedule.id,
+                observed,
                 now=now,
                 reason="agent disabled",
                 next_due_at=upcoming,
-            )
+            ):
+                # Another scheduler already claimed or skipped this slot.
+                logger.info(
+                    "schedule %s: skip lost the race, leaving it alone", schedule.id
+                )
             return False
 
         if has_unfinished_cycle(session, schedule.id):
-            record_skip(
+            if not record_skip(
                 session,
                 schedule.id,
+                observed,
                 now=now,
                 reason="previous cycle unfinished",
                 next_due_at=upcoming,
-            )
+            ):
+                # Another scheduler already claimed or skipped this slot.
+                logger.info(
+                    "schedule %s: skip lost the race, leaving it alone", schedule.id
+                )
             return False
 
         if not claim_firing(

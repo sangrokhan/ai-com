@@ -62,16 +62,24 @@ def has_unfinished_cycle(session: Session, schedule_id: uuid.UUID) -> bool:
 def record_skip(
     session: Session,
     schedule_id: uuid.UUID,
+    observed_due_at: datetime,
     *,
     now: datetime,
     reason: str,
     next_due_at: datetime,
 ) -> bool:
     """Advance the clock without firing. The clock moves on a skip too, so a
-    blocked schedule does not accumulate overdue slots to work through."""
+    blocked schedule does not accumulate overdue slots to work through.
+
+    Like `claim_firing`, the clock value the caller observed is part of the
+    WHERE clause: without it, a skip could overwrite
+    `last_skipped_at`/`last_skip_reason` on a schedule another instance just
+    fired, or move `next_due_at` backwards if commits interleave. Callers
+    MUST check the result before treating the skip as recorded.
+    """
     result = session.execute(
         update(Schedule)
-        .where(Schedule.id == schedule_id)
+        .where(Schedule.id == schedule_id, Schedule.next_due_at == observed_due_at)
         .values(next_due_at=next_due_at, last_skipped_at=now, last_skip_reason=reason)
     )
     return bool(result.rowcount)

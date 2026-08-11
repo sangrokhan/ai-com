@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from aicom.domain.enums import RunStatus
+from aicom.domain.enums import RunStatus, TaskStatus
 from aicom.notify.fake import FakeNotifier
 from aicom.orchestrator.scheduler import Scheduler
 from aicom.store.models import Run, Schedule, Task
@@ -92,6 +92,158 @@ def test_unfinished_previous_cycle_is_skipped_with_a_reason(
     assert refreshed.last_skipped_at == later
     assert refreshed.next_due_at > later
     assert len(list(session.scalars(select(Task).where(Task.schedule_id == schedule.id)))) == 1
+
+
+def _task_with_run(
+    session: Session,
+    schedule: Schedule,
+    *,
+    task_status: TaskStatus = TaskStatus.OPEN,
+    run_status: RunStatus,
+) -> Task:
+    task = Task(
+        id=uuid.uuid4(),
+        agent_id=schedule.agent_id,
+        title="t",
+        goal="g",
+        schedule_id=schedule.id,
+        status=task_status,
+    )
+    session.add(task)
+    session.flush()
+    session.add(Run(id=uuid.uuid4(), task_id=task.id, attempt=1, status=run_status))
+    session.commit()
+    return task
+
+
+def test_a_run_awaiting_approval_skips_the_next_firing(
+    sessions: sessionmaker[Session], session: Session
+) -> None:
+    # A run parked on a Slack sign-off can sit for days. The next firing
+    # must skip while it does, not pile a second identical proposal on top.
+    schedule = _schedule(session, due=NOW)
+    _task_with_run(session, schedule, run_status=RunStatus.AWAITING_APPROVAL)
+
+    assert Scheduler(sessions, FakeNotifier()).tick(NOW) == 0
+
+    session.expire_all()
+    refreshed = session.get(Schedule, schedule.id)
+    assert refreshed is not None
+    assert refreshed.last_skip_reason == "previous cycle unfinished"
+    assert refreshed.last_skipped_at == NOW
+    assert refreshed.next_due_at > NOW
+    assert (
+        len(list(session.scalars(select(Task).where(Task.schedule_id == schedule.id))))
+        == 1
+    )
+
+
+def test_a_blocked_task_skips_the_next_firing(
+    sessions: sessionmaker[Session], session: Session
+) -> None:
+    # A task can be blocked with its run already terminal (e.g. the run
+    # failed and the task itself was left blocked pending a human look).
+    # The schedule must still treat the cycle as unfinished.
+    schedule = _schedule(session, due=NOW)
+    _task_with_run(
+        session,
+        schedule,
+        task_status=TaskStatus.BLOCKED,
+        run_status=RunStatus.FAILED,
+    )
+
+    assert Scheduler(sessions, FakeNotifier()).tick(NOW) == 0
+
+    session.expire_all()
+    refreshed = session.get(Schedule, schedule.id)
+    assert refreshed is not None
+    assert refreshed.last_skip_reason == "previous cycle unfinished"
+    assert refreshed.last_skipped_at == NOW
+    assert refreshed.next_due_at > NOW
+    assert (
+        len(list(session.scalars(select(Task).where(Task.schedule_id == schedule.id))))
+        == 1
+    )
+
+
+def test_a_queued_run_skips_the_next_firing(
+    sessions: sessionmaker[Session], session: Session
+) -> None:
+    # QUEUED is the state a system-wide usage-limit pause leaves a run in.
+    # This is the property that lets the scheduler need no explicit pause
+    # check: a queued run alone is enough to skip the next firing.
+    schedule = _schedule(session, due=NOW)
+    _task_with_run(session, schedule, run_status=RunStatus.QUEUED)
+
+    assert Scheduler(sessions, FakeNotifier()).tick(NOW) == 0
+
+    session.expire_all()
+    refreshed = session.get(Schedule, schedule.id)
+    assert refreshed is not None
+    assert refreshed.last_skip_reason == "previous cycle unfinished"
+    assert refreshed.last_skipped_at == NOW
+    assert refreshed.next_due_at > NOW
+    assert (
+        len(list(session.scalars(select(Task).where(Task.schedule_id == schedule.id))))
+        == 1
+    )
+
+
+def test_a_pending_sign_off_survives_repeated_pauses_then_resumes(
+    sessions: sessionmaker[Session], session: Session
+) -> None:
+    # The central interaction: a schedule fires, its run parks awaiting
+    # sign-off for three days, the account-limit pause happens twice in
+    # that window (each tick still finding the run AWAITING_APPROVAL), the
+    # operator approves, and only then does the next firing succeed.
+    schedule = _schedule(session, due=NOW - timedelta(minutes=1))
+    scheduler = Scheduler(sessions, FakeNotifier())
+
+    assert scheduler.tick(NOW) == 1
+    session.expire_all()
+    tasks = list(session.scalars(select(Task).where(Task.schedule_id == schedule.id)))
+    assert len(tasks) == 1
+    run = session.scalars(select(Run).where(Run.task_id == tasks[0].id)).one()
+    run.status = RunStatus.AWAITING_APPROVAL
+    session.commit()
+
+    # Two more ticks land while the sign-off is still pending -- standing in
+    # for two separate account-limit pauses over the following three days.
+    tick_1 = NOW + timedelta(days=1)
+    tick_2 = NOW + timedelta(days=2)
+    assert scheduler.tick(tick_1) == 0
+    assert scheduler.tick(tick_2) == 0
+
+    session.expire_all()
+    refreshed = session.get(Schedule, schedule.id)
+    assert refreshed is not None
+    assert refreshed.last_skip_reason == "previous cycle unfinished"
+    assert refreshed.last_skipped_at == tick_2
+    assert (
+        len(list(session.scalars(select(Task).where(Task.schedule_id == schedule.id))))
+        == 1
+    )
+
+    # The operator approves on day three: the run and its task complete.
+    session.expire_all()
+    run = session.get(Run, run.id)
+    assert run is not None
+    run.status = RunStatus.SUCCEEDED
+    task = session.get(Task, tasks[0].id)
+    assert task is not None
+    task.status = TaskStatus.DONE
+    session.commit()
+
+    refreshed = session.get(Schedule, schedule.id)
+    assert refreshed is not None
+    due_after_completion = refreshed.next_due_at
+    assert scheduler.tick(due_after_completion + timedelta(seconds=1)) == 1
+
+    session.expire_all()
+    assert (
+        len(list(session.scalars(select(Task).where(Task.schedule_id == schedule.id))))
+        == 2
+    )
 
 
 def test_a_long_overdue_schedule_fires_once_and_rejoins_the_normal_cadence(

@@ -33,14 +33,28 @@ def run_worker_forever(settings: Settings | None = None) -> None:
         # process, so an uncaught exception here would silently stop every
         # queued task and every pending Slack reminder from ever being
         # picked up again. Log and keep looping; the next iteration retries.
+        #
+        # Each stage gets its own try/except so a failure in one (e.g. the
+        # sweeper) cannot skip the others (e.g. the scheduler) within the
+        # same iteration -- the scheduler's own per-schedule isolation would
+        # otherwise be contingent on the sweeper's health.
         try:
             sweeper.recover_stale_runs(now, stale_after=STALE_AFTER)
             sweeper.sweep_reminders(now)
+        except Exception:
+            logger.exception("run_worker_forever: sweeper failed, continuing")
+
+        try:
             scheduler.tick(now)
+        except Exception:
+            logger.exception("run_worker_forever: scheduler failed, continuing")
+
+        try:
             did_work = worker.tick(now)
         except Exception:
-            logger.exception("run_worker_forever: iteration failed, continuing")
+            logger.exception("run_worker_forever: worker failed, continuing")
             did_work = False
+
         if not did_work:
             time.sleep(settings.worker_poll_seconds)
 
