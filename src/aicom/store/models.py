@@ -43,6 +43,12 @@ class Agent(Base):
     persona: Mapped[str] = mapped_column(Text, default="")
     autonomy_level: Mapped[str] = mapped_column(String(32), default="standard")
     allowed_tools: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    # Tools that exist for this agent but are reachable ONLY through a signed-off
+    # gate approval: the worker adds the single approved tool to --allowedTools for
+    # exactly one execution (spec §5.1 step 4). A tool listed here must never also
+    # appear in allowed_tools -- that would make it permanently callable and
+    # silently disable the boundary -- so the worker refuses to run such an agent.
+    gated_tools: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     mcp_config: Mapped[dict] = mapped_column(JSONB, default=dict)
     workspace_root: Mapped[str | None] = mapped_column(String(512), default=None)
     # reserved for a future git-worktree executor mode; unused in S1

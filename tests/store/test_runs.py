@@ -59,10 +59,47 @@ def test_transition_rejects_illegal_pairs(session: Session) -> None:
         transition(session, run.id, RunStatus.QUEUED, RunStatus.SUCCEEDED)
 
 
+def test_heartbeat_from_a_non_owning_worker_does_not_update_the_row(session: Session) -> None:
+    """After the sweeper recovers a run and a NEW worker claims it, the old
+    worker's zombie heartbeat ticker must not keep stamping heartbeat_at --
+    that would corrupt the new attempt's staleness signal."""
+    run = _queued_run(session)
+    claim_next_queued(session, worker_id="w2", now=NOW)
+    session.commit()
+
+    assert touch_heartbeat(session, run.id, NOW + timedelta(minutes=9), worker_id="w1") is False
+    session.commit()
+
+    session.expire_all()
+    refreshed = session.get(Run, run.id)
+    assert refreshed is not None
+    assert refreshed.heartbeat_at == NOW
+
+    # ...and the owning worker still can.
+    assert touch_heartbeat(session, run.id, NOW + timedelta(minutes=9), worker_id="w2") is True
+    session.commit()
+    session.expire_all()
+    refreshed = session.get(Run, run.id)
+    assert refreshed is not None
+    assert refreshed.heartbeat_at == NOW + timedelta(minutes=9)
+
+
+def test_heartbeat_does_not_touch_a_run_that_left_running(session: Session) -> None:
+    """The sign-off race can return a run to QUEUED while its executor is
+    still exiting; the ticker must not stamp it."""
+    run = _queued_run(session)
+    claim_next_queued(session, worker_id="w1", now=NOW)
+    session.commit()
+    transition(session, run.id, RunStatus.RUNNING, RunStatus.QUEUED)
+    session.commit()
+
+    assert touch_heartbeat(session, run.id, NOW + timedelta(minutes=9), worker_id="w1") is False
+
+
 def test_stale_running_runs_detected_by_heartbeat(session: Session) -> None:
     run = _queued_run(session)
     claim_next_queued(session, worker_id="w1", now=NOW)
-    touch_heartbeat(session, run.id, NOW)
+    touch_heartbeat(session, run.id, NOW, worker_id="w1")
     session.commit()
 
     assert stale_running_runs(session, older_than=NOW - timedelta(minutes=1)) == []

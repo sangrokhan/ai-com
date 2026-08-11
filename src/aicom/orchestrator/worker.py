@@ -1,4 +1,5 @@
 import logging
+import sys
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -31,7 +32,44 @@ from aicom.store.system_state import (
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
-GATE_TOOL = "mcp__gate__request_approval_tool"
+
+# Single source of truth for the gate wiring. The Claude Code CLI exposes an
+# MCP tool as `mcp__<server-key>__<tool-function>`, so the whitelist entry the
+# worker appends is DERIVED from the server key it injects and the name of the
+# @mcp.tool() function in aicom/gate/server.py -- never spelled out twice. If
+# those could drift, --allowedTools would carry a name that matches nothing and
+# the agent's only route to a gated action would silently vanish.
+GATE_SERVER_NAME = "gate"  # must equal FastMCP("gate") in aicom.gate.server
+GATE_TOOL_FUNCTION = "request_approval_tool"  # the @mcp.tool() function name
+GATE_TOOL = f"mcp__{GATE_SERVER_NAME}__{GATE_TOOL_FUNCTION}"
+
+
+def gate_server_spec() -> dict[str, object]:
+    """Spawn spec for the gate MCP server, injected into every run.
+
+    Equivalent to `python -m aicom.gate.server`, but pinned to the interpreter
+    running the worker so the server always imports the same aicom package and
+    virtualenv. The server reads AICOM_RUN_ID from the environment, which
+    ClaudeCliExecutor injects per run.
+    """
+    return {"command": sys.executable, "args": ["-m", "aicom.gate.server"]}
+
+
+class GatedToolMisconfiguration(Exception):
+    """An agent lists a gated tool in allowed_tools.
+
+    That makes the tool permanently callable without any sign-off, which
+    silently disables the entire autonomy boundary for that tool. Refuse to
+    run rather than proceed with a dead gate.
+    """
+
+    def __init__(self, agent_name: str, tools: tuple[str, ...]) -> None:
+        self.tools = tools
+        super().__init__(
+            f"agent {agent_name} lists gated tool(s) in allowed_tools: "
+            f"{', '.join(tools)}. A gated tool must be reachable only through "
+            f"an approved {GATE_TOOL} request; remove them from allowed_tools."
+        )
 
 
 class Worker:
@@ -70,24 +108,64 @@ class Worker:
             session.commit()
             if run is None:
                 return False
-            request = self._build_request(session, run)
+            try:
+                request = self._build_request(session, run)
+            except GatedToolMisconfiguration as exc:
+                session.rollback()
+                fresh = session.get(Run, run.id, populate_existing=True)
+                assert fresh is not None
+                self._fail_misconfigured(session, fresh, exc, now)
+                session.commit()
+                return True
             session.commit()
 
-        outcome = self._execute(run.id, request)
+        # try/finally so the _resume_flags entry for this run is always
+        # removed, even if _execute raises: _finalize (which normally pops it)
+        # would never run, and the stale entry would then be read by a LATER
+        # execution of the same run id and wrongly clear its resume state.
+        try:
+            outcome = self._execute(run.id, request)
 
-        with self._sessions() as session:
-            fresh = session.get(Run, run.id)
-            assert fresh is not None
-            self.finalize(session, fresh, outcome, request, now)
-            session.commit()
+            with self._sessions() as session:
+                fresh_run = session.get(Run, run.id)
+                assert fresh_run is not None
+                self._finalize(session, fresh_run, outcome, request, now)
+                session.commit()
+        finally:
+            self._resume_flags.pop(run.id, None)
         return True
 
     def _build_request(self, session: Session, run: Run) -> RunRequest:
         agent = run.task.agent
+        gated = tuple(agent.gated_tools or ())
+        # Validate BEFORE any mutation or workspace creation, so a
+        # misconfigured agent leaves no half-built state behind.
+        overlap = tuple(sorted(set(gated) & set(agent.allowed_tools)))
+        if overlap:
+            raise GatedToolMisconfiguration(agent.name, overlap)
+
         workspace = prepare_workspace(self._settings.workspace_root, agent.name, run.id)
-        mcp_config, env = resolve_secrets(agent.mcp_config, _lookup_secret)
+        # The gate server is wired in by CODE, never by convention: an agent
+        # whose mcp_config happens to omit (or misname, or shadow) a "gate"
+        # entry would otherwise have no route to sign-off at all, while still
+        # being handed GATE_TOOL in --allowedTools. Injected last so it always
+        # wins over any same-named key the agent config carries.
+        mcp_config, env = resolve_secrets(
+            {**agent.mcp_config, GATE_SERVER_NAME: gate_server_spec()}, _lookup_secret
+        )
         run.workspace_path = str(workspace)
         allowed = tuple(agent.allowed_tools) + (GATE_TOOL,)
+        granted = self._approved_gated_tool(session, run, gated)
+        if granted is not None:
+            # Spec §5.1 step 4: the approved tool is whitelisted for THIS
+            # execution only. Nothing persists it, so a retry, a later run of
+            # the same task, or any other agent starts without it.
+            allowed += (granted,)
+            logger.info(
+                "run %s: temporarily allowing gated tool %s for this execution only",
+                run.id,
+                granted,
+            )
         # Capture the fact directly, not a proxy for it (see _resume_flags).
         self._resume_flags[run.id] = run.resume_pending
         return RunRequest(
@@ -101,6 +179,65 @@ class Worker:
             timeout_seconds=agent.max_run_seconds,
         )
 
+    def _approved_gated_tool(
+        self, session: Session, run: Run, gated: tuple[str, ...]
+    ) -> str | None:
+        """The one gated tool this execution may use, or None.
+
+        Only a run that is actually being resumed with a decision can carry a
+        grant. The tool name comes from the approval payload -- which is
+        AGENT-supplied, so it is checked against the agent's gated_tools list:
+        the operator signed off on a proposal, not on whatever tool string the
+        agent chose to put in the payload. A payload naming anything else is
+        refused, and a rejected (or tool-less) approval grants nothing.
+        """
+        if not run.resume_pending or not gated:
+            return None
+        approval = session.scalar(
+            select(Approval)
+            .where(Approval.run_id == run.id, Approval.decided_at.is_not(None))
+            .order_by(Approval.decided_at.desc(), Approval.created_at.desc())
+            .limit(1)
+        )
+        if approval is None or approval.status is not ApprovalStatus.APPROVED:
+            return None
+        tool = (approval.payload or {}).get("tool")
+        if tool is None:
+            return None
+        if not isinstance(tool, str) or tool not in gated:
+            logger.warning(
+                "run %s: approval %s payload names tool %r which is not in the "
+                "agent's gated_tools; refusing to grant it",
+                run.id,
+                approval.id,
+                tool,
+            )
+            return None
+        return tool
+
+    def _fail_misconfigured(
+        self,
+        session: Session,
+        run: Run,
+        exc: GatedToolMisconfiguration,
+        now: datetime,
+    ) -> None:
+        logger.error("run %s cannot start: %s", run.id, exc)
+        applied = transition(session, run.id, RunStatus.RUNNING, RunStatus.FAILED, ended_at=now)
+        if not applied:
+            return
+        run.task.status = TaskStatus.FAILED
+        self._notifier.send_run_report(
+            RunReport(
+                run_id=run.id,
+                agent_name=run.task.agent.name,
+                task_title=run.task.title,
+                status=RunStatus.FAILED,
+                summary=f"Refused to run: {exc}",
+                cost_usd=None,
+            )
+        )
+
     def _execute(self, run_id: uuid.UUID, request: RunRequest) -> RunOutcome:
         # The stream parser's own seq counter always restarts at 0 per process
         # invocation, but a single run row can be executed by more than one
@@ -111,11 +248,24 @@ class Worker:
             max_seq = session.scalar(select(func.max(Event.seq)).where(Event.run_id == run_id))
             next_seq = (max_seq if max_seq is not None else -1) + 1
 
+        # The executor's reader threads are daemons that can outlive run() if
+        # a grandchild holds the stdout pipe open (see ClaudeCliExecutor).
+        # Once this execution is done, any late callback must be dropped: it
+        # would otherwise write events against an already-finalised run,
+        # producing phantom events or (run_id, seq) collisions with whatever
+        # executes this run next.
+        done = threading.Event()
+
         def on_event(event: ParsedEvent) -> None:
             nonlocal next_seq
+            if done.is_set():
+                logger.warning(
+                    "dropping event from a leaked reader thread for finished run %s", run_id
+                )
+                return
             with self._sessions() as session:
                 append_event(session, run_id, next_seq, event.type, event.payload)
-                touch_heartbeat(session, run_id, datetime.now(UTC))
+                touch_heartbeat(session, run_id, datetime.now(UTC), worker_id=self._worker_id)
                 session.commit()
             next_seq += 1
 
@@ -132,7 +282,9 @@ class Worker:
             while not stop.wait(interval):
                 try:
                     with self._sessions() as session:
-                        touch_heartbeat(session, run_id, datetime.now(UTC))
+                        touch_heartbeat(
+                            session, run_id, datetime.now(UTC), worker_id=self._worker_id
+                        )
                         session.commit()
                 except Exception:  # a heartbeat hiccup must never kill the run
                     logger.exception("heartbeat tick failed for run %s", run_id)
@@ -142,10 +294,11 @@ class Worker:
         try:
             return self._executor.run(request, on_event)
         finally:
+            done.set()
             stop.set()
             ticker.join(timeout=5)
 
-    def finalize(
+    def _finalize(
         self,
         session: Session,
         run: Run,
@@ -153,6 +306,14 @@ class Worker:
         request: RunRequest,
         now: datetime,
     ) -> None:
+        """Close out one execution. PRIVATE and instance-bound by contract:
+        it may only be called on the same Worker instance that built
+        `request`, because it consumes that instance's in-process
+        `_resume_flags` entry for this run. Called from any other Worker (or
+        for a request this Worker did not build) it would read a missing flag
+        and silently mis-handle the run's resume state. `tick` is the only
+        caller.
+        """
         # Captured at request-build time, not re-derived here: this is true
         # only if THIS execution actually consumed a resume (i.e. the run was
         # resume_pending when the request was built). A resume that arrives

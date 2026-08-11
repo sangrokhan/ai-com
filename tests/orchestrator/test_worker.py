@@ -10,7 +10,12 @@ from aicom.config import Settings
 from aicom.domain.enums import ExitReason, RunStatus
 from aicom.executor.fake import FakeExecutor
 from aicom.notify.fake import FakeNotifier
-from aicom.orchestrator.worker import Worker
+from aicom.orchestrator.worker import (
+    GATE_SERVER_NAME,
+    GATE_TOOL,
+    GATE_TOOL_FUNCTION,
+    Worker,
+)
 from aicom.store.models import Run, Task
 from aicom.store.system_state import get_pause
 from tests.store.test_models import make_agent
@@ -26,8 +31,8 @@ def _settings(tmp_path: Path) -> Settings:
     )
 
 
-def _queued(session: Session) -> Run:
-    agent = make_agent(session)
+def _queued(session: Session, **agent_kw: object) -> Run:
+    agent = make_agent(session, **agent_kw)  # type: ignore[arg-type]
     task = Task(id=uuid.uuid4(), agent_id=agent.id, title="Research", goal="Find things.")
     session.add(task)
     session.flush()
@@ -296,7 +301,7 @@ def test_finalize_ignores_stale_success_when_run_was_resumed_from_underneath(
     outcome = RunOutcome(reason=ExitReason.COMPLETED, exit_code=0, session_id="s-99")
     fresh = session.get(Run, claimed.id, populate_existing=True)
     assert fresh is not None
-    worker.finalize(session, fresh, outcome, request, NOW)
+    worker._finalize(session, fresh, outcome, request, NOW)
     session.commit()
 
     session.expire_all()
@@ -371,7 +376,7 @@ def test_handle_failure_creates_no_retry_when_run_was_resumed_from_underneath(
     crashed = RunOutcome(reason=ExitReason.CRASHED, exit_code=1)
     fresh = session.get(Run, claimed.id, populate_existing=True)
     assert fresh is not None
-    worker.finalize(session, fresh, crashed, request, NOW)
+    worker._finalize(session, fresh, crashed, request, NOW)
     session.commit()
 
     session.expire_all()
@@ -417,3 +422,227 @@ def test_heartbeat_advances_during_a_silent_execution(
     # ticker tick would advance it to real wall-clock time in between.
     assert refreshed.heartbeat_at != NOW
     assert before <= refreshed.heartbeat_at <= after
+
+
+# --------------------------------------------------------------------------
+# C1: the gate MCP server must always be wired into the CLI invocation.
+# --------------------------------------------------------------------------
+
+
+def test_gate_tool_name_is_derived_from_the_server_and_tool_function() -> None:
+    """GATE_TOOL is what the worker whitelists; the CLI names an MCP tool
+    `mcp__<server>__<tool>`. If the constant and the actual server/tool names
+    ever drift, the whitelist entry silently matches nothing and the only
+    route to a gated action disappears."""
+    assert GATE_TOOL == f"mcp__{GATE_SERVER_NAME}__{GATE_TOOL_FUNCTION}"
+
+    server_src = (
+        Path(__file__).resolve().parents[2] / "src" / "aicom" / "gate" / "server.py"
+    ).read_text()
+    assert f'FastMCP("{GATE_SERVER_NAME}")' in server_src
+    assert f"def {GATE_TOOL_FUNCTION}(" in server_src
+
+
+def test_gate_server_is_injected_for_an_agent_with_no_mcp_config(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    run = _queued(session, mcp_config={})
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    config = executor.requests[0].mcp_config
+    assert GATE_SERVER_NAME in config
+    assert config[GATE_SERVER_NAME]["args"] == ["-m", "aicom.gate.server"]
+    assert GATE_TOOL in executor.requests[0].allowed_tools
+
+
+def test_injected_gate_entry_wins_over_a_conflicting_agent_key(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    run = _queued(
+        session,
+        mcp_config={
+            "gate": {"command": "/bin/false", "args": []},
+            "docs": {"command": "docs-server", "args": []},
+        },
+    )
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    config = executor.requests[0].mcp_config
+    assert config[GATE_SERVER_NAME]["args"] == ["-m", "aicom.gate.server"]
+    assert config[GATE_SERVER_NAME]["command"] != "/bin/false"
+    assert config["docs"] == {"command": "docs-server", "args": []}
+
+
+# --------------------------------------------------------------------------
+# C2: an approved gated tool is temporarily re-enabled for exactly one run.
+# --------------------------------------------------------------------------
+
+GATED = "mcp__broker__place_order"
+OTHER_GATED = "mcp__broker__cancel_order"
+
+
+def _decide(session: Session, run: Run, *, approved: bool, payload: dict) -> None:
+    """Drive the real gate + Slack-resolution path so the run comes back
+    QUEUED with resume_pending set and a decided approval attached."""
+    from aicom.gate.service import request_approval
+    from aicom.inbound.app import ResolveOutcome, resolve_approval
+    from aicom.store.models import Approval
+    from aicom.store.runs import claim_next_queued
+
+    claimed = claim_next_queued(session, worker_id="w0", now=NOW)
+    assert claimed is not None and claimed.id == run.id
+    session.commit()
+    request_approval(
+        session,
+        run_id=run.id,
+        kind="execute_order",
+        proposal="Place the order. Alt: skip. Reversible: no.",
+        payload=payload,
+        now=NOW,
+    )
+    session.commit()
+    approval = session.scalar(select(Approval).where(Approval.run_id == run.id))
+    assert approval is not None
+    outcome = resolve_approval(
+        session, nonce=approval.nonce, decided_by="U1", approved=approved, now=NOW
+    )
+    session.commit()
+    assert outcome is ResolveOutcome.REQUEUED
+
+
+def test_approved_resume_grants_exactly_the_approved_gated_tool(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    run = _queued(session, gated_tools=[GATED, OTHER_GATED])
+    _decide(session, run, approved=True, payload={"tool": GATED, "qty": 1})
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    allowed = executor.requests[0].allowed_tools
+    assert set(allowed) == {"Read", "Grep", "WebSearch", GATE_TOOL, GATED}
+
+
+def test_approved_payload_naming_a_tool_outside_gated_tools_is_refused(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    """The payload is agent-supplied. Honouring an arbitrary tool name in it
+    would let the agent pick its own reward: the operator signs off on a
+    proposal, not on a tool string the agent chose."""
+    run = _queued(session, gated_tools=[GATED])
+    _decide(session, run, approved=True, payload={"tool": "Bash"})
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    allowed = executor.requests[0].allowed_tools
+    assert "Bash" not in allowed
+    assert set(allowed) == {"Read", "Grep", "WebSearch", GATE_TOOL}
+
+
+def test_rejected_approval_grants_nothing(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    run = _queued(session, gated_tools=[GATED])
+    _decide(session, run, approved=False, payload={"tool": GATED})
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    assert set(executor.requests[0].allowed_tools) == {"Read", "Grep", "WebSearch", GATE_TOOL}
+
+
+def test_temporary_grant_does_not_survive_into_a_later_run(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    run = _queued(session, gated_tools=[GATED])
+    _decide(session, run, approved=True, payload={"tool": GATED})
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+    worker = _worker(sessions, executor, notifier, tmp_path)
+    worker.tick(NOW)
+    assert GATED in executor.requests[0].allowed_tools
+
+    # A later run of the same task, same agent: the approval row is still
+    # APPROVED in the database, but the grant was for one execution only.
+    later = Run(id=uuid.uuid4(), task_id=run.task_id, attempt=2)
+    session.add(later)
+    session.commit()
+    executor.queue(later.id, [json.dumps({"type": "result"})])
+    worker.tick(NOW)
+
+    assert set(executor.requests[1].allowed_tools) == {"Read", "Grep", "WebSearch", GATE_TOOL}
+
+
+def test_gated_tool_also_in_allowed_tools_fails_the_run_and_notifies(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    """A gated tool sitting in the always-allowed list makes the tool callable
+    without sign-off, i.e. silently disables the entire boundary. That must
+    fail loudly, not run."""
+    run = _queued(
+        session,
+        allowed_tools=["Read", GATED],
+        gated_tools=[GATED],
+    )
+    executor, notifier = FakeExecutor(), FakeNotifier()
+
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    assert executor.requests == []  # nothing was ever executed
+    session.expire_all()
+    refreshed = session.get(Run, run.id)
+    assert refreshed is not None
+    assert refreshed.status is RunStatus.FAILED
+    told = notifier.notices + [r.summary for r in notifier.reports]
+    assert any(GATED in message for message in told)
+
+
+# --------------------------------------------------------------------------
+# I2: a leaked reader thread must not write events after finalisation.
+# --------------------------------------------------------------------------
+
+
+def test_late_event_after_execution_is_ignored(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    """A grandchild can keep the stdout pipe open, leaving a daemon reader
+    thread alive past run(). Its on_event callbacks must be dropped, not
+    written against a run that has already been finalised."""
+    from aicom.executor.stream import ParsedEvent
+    from aicom.store.models import Event
+
+    run = _queued(session)
+
+    class CapturingExecutor(FakeExecutor):
+        captured: object = None
+
+        def run(self, req, on_event):  # type: ignore[no-untyped-def]
+            type(self).captured = on_event
+            return super().run(req, on_event)
+
+    executor, notifier = CapturingExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "assistant", "message": {}})])
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    session.expire_all()
+    before = len(session.scalars(select(Event).where(Event.run_id == run.id)).all())
+
+    late = CapturingExecutor.captured
+    assert callable(late)
+    late(ParsedEvent(seq=99, type="assistant", payload={"late": True}))
+
+    session.expire_all()
+    after = session.scalars(select(Event).where(Event.run_id == run.id)).all()
+    assert len(after) == before
+    assert all(e.payload.get("late") is not True for e in after)

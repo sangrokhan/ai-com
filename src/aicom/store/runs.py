@@ -55,8 +55,26 @@ def transition(
     return bool(result.rowcount)
 
 
-def touch_heartbeat(session: Session, run_id: uuid.UUID, now: datetime) -> None:
-    session.execute(update(Run).where(Run.id == run_id).values(heartbeat_at=now))
+def touch_heartbeat(
+    session: Session, run_id: uuid.UUID, now: datetime, *, worker_id: str
+) -> bool:
+    """Stamp the heartbeat, but only while this worker still owns a RUNNING run.
+
+    Both filters matter. Without the worker filter, a worker whose run the
+    sweeper already recovered keeps stamping heartbeat_at from its zombie
+    ticker after a NEW worker claimed the run, so the new attempt looks alive
+    no matter what it does. Without the status filter, the same ticker stamps
+    runs the sign-off race has already returned to QUEUED.
+
+    Returns whether the row was actually updated, so a caller can tell "still
+    mine" from "no longer mine".
+    """
+    result = session.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status == RunStatus.RUNNING, Run.worker_id == worker_id)
+        .values(heartbeat_at=now)
+    )
+    return bool(result.rowcount)
 
 
 def stale_running_runs(session: Session, *, older_than: datetime) -> list[Run]:

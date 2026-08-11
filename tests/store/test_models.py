@@ -7,13 +7,21 @@ from aicom.domain.enums import ApprovalKind, ApprovalStatus, RunStatus, TaskStat
 from aicom.store.models import Agent, Approval, Run, Task
 
 
-def make_agent(session: Session, name: str = "researcher") -> Agent:
+def make_agent(
+    session: Session,
+    name: str = "researcher",
+    *,
+    allowed_tools: list[str] | None = None,
+    gated_tools: list[str] | None = None,
+    mcp_config: dict | None = None,
+) -> Agent:
     agent = Agent(
         id=uuid.uuid4(),
         name=f"{name}-{uuid.uuid4().hex[:6]}",
         persona="# Researcher\nYou research things.",
-        allowed_tools=["Read", "Grep", "WebSearch"],
-        mcp_config={"gate": {"command": "python", "args": ["-m", "aicom.gate.server"]}},
+        allowed_tools=allowed_tools if allowed_tools is not None else ["Read", "Grep", "WebSearch"],
+        gated_tools=gated_tools if gated_tools is not None else [],
+        mcp_config=mcp_config if mcp_config is not None else {},
     )
     session.add(agent)
     session.flush()

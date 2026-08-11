@@ -100,7 +100,7 @@ def test_stale_running_run_returns_to_queued(
     session.commit()
     run = claim_next_queued(session, worker_id="dead-worker", now=NOW)
     assert run is not None
-    touch_heartbeat(session, run.id, NOW)
+    touch_heartbeat(session, run.id, NOW, worker_id="dead-worker")
     session.commit()
 
     recovered = Sweeper(sessions, FakeNotifier()).recover_stale_runs(
@@ -161,7 +161,7 @@ def _running_run_with_attempt(session: Session, *, attempt: int) -> Run:
     session.commit()
     run = claim_next_queued(session, worker_id="dead-worker", now=NOW)
     assert run is not None
-    touch_heartbeat(session, run.id, NOW)
+    touch_heartbeat(session, run.id, NOW, worker_id="dead-worker")
     session.commit()
     return run
 
