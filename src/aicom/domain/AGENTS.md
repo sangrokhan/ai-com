@@ -12,6 +12,7 @@ Pure business logic for the orchestrator: enum vocabularies, the `Run` state mac
 | `enums.py` | `StrEnum` definitions: `RunStatus`, `TaskStatus`, `ApprovalStatus`, `ApprovalKind`, `ExitReason`, `TaskOrigin`. |
 | `transitions.py` | Legal `RunStatus` transition table plus `can_transition` / `assert_transition`. |
 | `views.py` | Frozen dataclasses (`ApprovalView`, `RunReport`, `DispatchRef`) for passing run/approval data without exposing ORM models. |
+| `cron.py` | Pure cron arithmetic: validates a cron expression/timezone pair and computes the next fire time. |
 
 ## Public Interface
 ```python
@@ -50,6 +51,12 @@ class RunReport:
 class DispatchRef:
     channel: str
     ts: str
+
+# cron.py
+class InvalidCron(Exception): ...
+
+def validate_cron(cron: str, timezone: str) -> None: ...  # raises InvalidCron
+def next_fire(cron: str, timezone: str, after: datetime) -> datetime: ...  # UTC
 ```
 
 ## For AI Agents

@@ -13,6 +13,7 @@ from aicom.store.models import (
     Base,
     Event,
     Run,
+    Schedule,
     SpendLedger,
     SystemState,
     Task,
@@ -20,8 +21,19 @@ from aicom.store.models import (
 
 # Child-to-parent FK order, so deletes never violate a foreign key constraint.
 # SpendLedger -> Approval, Agent; Event/Approval/Artifact -> Run; Run -> Task;
-# Task -> Agent, Task (self-referential parent_task_id); SystemState has no FK.
-_TABLES_IN_DELETE_ORDER = (SpendLedger, Event, Approval, Artifact, Run, Task, Agent, SystemState)
+# Task -> Agent, Task (self-referential parent_task_id), Schedule (ON DELETE
+# SET NULL); Schedule -> Agent; SystemState has no FK.
+_TABLES_IN_DELETE_ORDER = (
+    SpendLedger,
+    Event,
+    Approval,
+    Artifact,
+    Run,
+    Task,
+    Schedule,
+    Agent,
+    SystemState,
+)
 
 
 @pytest.fixture(scope="session")

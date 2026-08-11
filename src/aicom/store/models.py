@@ -61,6 +61,37 @@ class Agent(Base):
     )
 
 
+class Schedule(Base):
+    """A recurring definition that creates tasks on a cron schedule."""
+
+    __tablename__ = "schedule"
+    __table_args__ = (UniqueConstraint("agent_id", "name", name="uq_schedule_agent_name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent.id"))
+    name: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    cron: Mapped[str] = mapped_column(String(120))
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    title_template: Mapped[str] = mapped_column(String(300))
+    goal_template: Mapped[str] = mapped_column(Text)
+    # The firing clock AND the concurrency token: a firing is claimed by a
+    # conditional UPDATE matching the value the caller observed.
+    next_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_fired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_skipped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), default=None
+    )
+    last_skip_reason: Mapped[str | None] = mapped_column(String(200), default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    agent: Mapped[Agent] = relationship(lazy="joined")
+
+
 class Task(Base):
     __tablename__ = "task"
 
@@ -78,8 +109,9 @@ class Task(Base):
     created_by: Mapped[TaskOrigin] = mapped_column(
         Enum(TaskOrigin, name="task_origin", native_enum=False), default=TaskOrigin.HUMAN
     )
-    # column exists for S3; the S1 worker ignores it
-    schedule: Mapped[str | None] = mapped_column(String(120), default=None)
+    schedule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schedule.id", ondelete="SET NULL"), default=None, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

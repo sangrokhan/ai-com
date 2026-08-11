@@ -35,6 +35,15 @@ Routes registered on the returned router:
 - `GET /health` — `{"status": "ok"}`. Touches no database; it exists as the compose
   healthcheck for the `api` service, so keep it dependency-free or the container will
   report unhealthy whenever Postgres is merely slow to start.
+- `POST /schedules` (201) — body `CreateSchedule`; 400 if the cron/timezone pair is
+  invalid or the agent is disabled, 404 if `agent_id` doesn't exist. Computes the
+  initial `next_due_at` via `domain.cron.next_fire`. Returns `{"id": str(schedule.id)}`.
+- `GET /schedules` — list, newest first.
+- `PATCH /schedules/{schedule_id}` — body `UpdateSchedule`; any of `enabled`, `cron`,
+  `timezone`, `title_template`, `goal_template`. Changing `cron`/`timezone`
+  re-validates and recomputes `next_due_at` from now, not from the old cadence.
+- `DELETE /schedules/{schedule_id}` (204) — `task.schedule_id` is `ON DELETE SET
+  NULL`, so tasks the schedule already created keep their runs/events/artifacts.
 
 Related, one level up:
 ```python
@@ -42,14 +51,15 @@ Related, one level up:
 def run_worker_forever(settings: Settings | None = None) -> None: ...
 ```
 Not part of this module's interface, but it is the process entrypoint: builds the
-shared `sessionmaker`, `SlackNotifier`, `ClaudeCliExecutor`, constructs one `Worker`
-and one `Sweeper`, then loops forever calling
+shared `sessionmaker`, `SlackNotifier`, `ClaudeCliExecutor`, constructs one `Worker`,
+one `Sweeper`, and one `Scheduler`, then loops forever calling
 `sweeper.recover_stale_runs(now, stale_after=STALE_AFTER)` (STALE_AFTER = 10 min),
-`sweeper.sweep_reminders(now)`, and `worker.tick(now)` in that order per iteration,
-sleeping `settings.worker_poll_seconds` only when `tick()` did no work. The whole
-loop body is wrapped in `try/except Exception` — there is no external supervisor
-restarting this process, so one bad iteration (DB hiccup, executor crash) must not
-stop every queued task and pending reminder from ever being picked up again.
+`sweeper.sweep_reminders(now)`, `scheduler.tick(now)`, and `worker.tick(now)` in that
+order per iteration, sleeping `settings.worker_poll_seconds` only when `tick()` did
+no work. The whole loop body is wrapped in `try/except Exception` — there is no
+external supervisor restarting this process, so one bad iteration (DB hiccup,
+executor crash) must not stop every queued task and pending reminder from ever
+being picked up again.
 
 ## For AI Agents
 
@@ -90,8 +100,9 @@ Covered by `tests/api/test_routes.py` using fixtures from `tests/api/conftest.py
 ## Dependencies
 
 ### Internal
-Imports `domain.enums` (`ApprovalStatus`) and `store.models`
-(`Agent`, `Approval`, `Event`, `Run`, `Task`). Imported by `aicom/inbound/app.py`
+Imports `domain.enums` (`ApprovalStatus`), `domain.cron` (`InvalidCron`, `next_fire`,
+`validate_cron`), and `store.models` (`Agent`, `Approval`, `Event`, `Run`, `Schedule`,
+`Task`). Imported by `aicom/inbound/app.py`
 (`from aicom.api.routes import make_router`, then `app.include_router(...)`) —
 nothing in `orchestrator/` imports this module.
 
