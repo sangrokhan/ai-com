@@ -15,6 +15,7 @@ caller of `Worker` and `Sweeper` in production.
 |------|-------------|
 | `worker.py` | `Worker.tick()`: claim a run, build the CLI request, execute it, finalize the outcome. |
 | `sweeper.py` | `Sweeper`: escalates unanswered approval reminders, recovers runs with a dead worker. |
+| `scheduler.py` | `Scheduler`: turns due recurring `Schedule` rows into a `Task` + first `Run`. |
 | `artifacts.py` | `commit_run_artifacts()`: copies a run's workspace files into the artifact git repo and commits. |
 | `prompts.py` | `build_prompt()`: renders the task prompt, including the resume/sign-off addendum. |
 
@@ -47,6 +48,11 @@ def commit_run_artifacts(session: Session, *, run_id: uuid.UUID, workspace: Path
 
 # prompts.py
 def build_prompt(task_title: str, goal: str, resume_note: str | None) -> str: ...
+
+# scheduler.py
+class Scheduler:
+    def __init__(self, sessions: sessionmaker[Session], notifier: Notifier) -> None: ...
+    def tick(self, now: datetime) -> int: ...  # number of tasks created
 ```
 
 ## For AI Agents
@@ -92,11 +98,28 @@ def build_prompt(task_title: str, goal: str, resume_note: str | None) -> str: ..
   `done.is_set()` — the executor's reader threads are daemons that can outlive
   `_execute` if a grandchild process holds stdout open; a late write would corrupt
   the `(run_id, seq)` sequence of whatever runs that `run_id` next.
+- **`Scheduler.tick` advances `Schedule.next_due_at` on both a firing and a skip.**
+  `record_skip` and `claim_firing` both move the clock forward to the *next* cron
+  occurrence after `now`, never leaving it at the missed slot. This is deliberate:
+  if the schedule was blocked for six hours (a disabled agent, an unfinished
+  cycle), the clock does not sit at the first missed slot and replay six queued
+  firings once it is unblocked — it always fires at most once per tick, for the
+  most recent due slot. That is also why a six-hour outage against, say, an
+  hourly schedule produces exactly one firing against a freshly reset account
+  limit rather than six runs racing to reuse a quota that just came back.
+- **At most one pending task per schedule is the intended maximum, not a special
+  case to guard against.** `has_unfinished_cycle` skips firing while the
+  previous cycle's task/run is still live, so a schedule can never have more
+  than one open task in flight. This is also why `Scheduler` needs no explicit
+  check against the system-wide LLM pause: a paused account simply leaves the
+  previous run `QUEUED`/`RUNNING`, which `has_unfinished_cycle` already treats
+  as an unfinished cycle and skips.
 
 ### Testing Requirements
 Covered by `tests/orchestrator/test_worker.py`, `test_sweeper.py`, `test_artifacts.py`,
-using `FakeExecutor`/`FakeNotifier` fixtures from `tests/orchestrator/conftest.py` and
-a real Postgres via testcontainers. Run: `.venv/bin/pytest tests/orchestrator -m "not smoke"`.
+`test_scheduler.py`, using `FakeExecutor`/`FakeNotifier` fixtures from
+`tests/orchestrator/conftest.py` and a real Postgres via testcontainers. Run:
+`.venv/bin/pytest tests/orchestrator -m "not smoke"`.
 
 ### Common Patterns
 - Every DB-mutating step opens its own `with self._sessions() as session:` block and
@@ -112,8 +135,8 @@ a real Postgres via testcontainers. Run: `.venv/bin/pytest tests/orchestrator -m
 ### Internal
 Imports `domain` (enums, views), `executor` (`Executor`, `RunOutcome`, `RunRequest`,
 secrets, stream parsing, workspace prep), `notify` (`Notifier`), `quota` (reset-time
-parsing/backoff), `store` (events, models, runs, system_state, approvals). Imported
-only by `aicom/main.py` (`Worker`, `Sweeper`).
+parsing/backoff), `store` (events, models, runs, system_state, approvals, schedules).
+Imported only by `aicom/main.py` (`Worker`, `Sweeper`, `Scheduler`).
 
 ### External
 `sqlalchemy` (`Session`, `sessionmaker`, `select`, `func`).

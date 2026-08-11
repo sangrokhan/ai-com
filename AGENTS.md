@@ -31,7 +31,7 @@ Three documents, in this order, before making a non-trivial change:
 | `alembic.ini` | Migration config; the URL comes from app settings, not from here |
 | `README.md` | How an operator runs the system |
 | `src/aicom/config.py` | `Settings`, env prefix `AICOM_` — the full configuration surface |
-| `src/aicom/main.py` | Process entrypoint for the worker + sweeper loop |
+| `src/aicom/main.py` | Process entrypoint for the worker + sweeper + scheduler loop |
 
 ## Subdirectories
 
@@ -118,14 +118,14 @@ POST /tasks ──> task + first queued run
 
 ### Project Roadmap
 
-The work is decomposed into five sub-projects. S1 and S2 are shipped; the rest are not
-started, though their schema seams exist.
+The work is decomposed into five sub-projects. S1, S2, and S3 are shipped; the rest
+are not started, though their schema seams exist.
 
 | ID | Scope | State |
 |----|-------|-------|
 | S1 | Core orchestrator: domain, store, executor, worker, artifacts | Shipped |
 | S2 | Slack approval bridge: gate, notify, inbound, sweeper | Shipped |
-| S3 | Scheduler: cron periodic jobs. `task.schedule` exists and is ignored today | Not started |
+| S3 | Scheduler: cron periodic jobs | Shipped |
 | S4 | Web console: sprite dashboard, persona/skill editing, SSE. `api/` is the seam | Not started |
 | S5 | Profit agent packs: trading, content, freelance, opportunity research | Not started |
 

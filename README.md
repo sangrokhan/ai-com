@@ -124,6 +124,30 @@ This is a deliberate scope decision for this task, not an oversight:
 row and returns `404`/`400` otherwise, so a typo'd or disabled agent id fails loudly
 at request time instead of silently queuing a run nothing will ever pick up.
 
+## Schedules
+
+Recurring work is created once and fired by the scheduler on a cron cadence, instead
+of via one-off `POST /tasks` calls:
+
+```bash
+curl -X POST http://127.0.0.1:8000/schedules \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "agent_id": "00000000-0000-0000-0000-000000000000",
+        "name": "hourly scan",
+        "cron": "0 * * * *",
+        "timezone": "UTC",
+        "title_template": "Hourly scan",
+        "goal_template": "Scan and report."
+      }'
+```
+
+`GET /schedules` lists them, `PATCH /schedules/{id}` updates the cadence or
+templates (or disables one), and `DELETE /schedules/{id}` removes it without
+touching tasks it already created. The `worker + sweeper + scheduler` loop
+(`python -m aicom.main`) fires each due schedule at most once per tick, skipping
+(and advancing the clock past) a slot whose previous cycle is still open.
+
 ## The approval gate
 
 The `gate` MCP server (`aicom.gate.server`) is injected into every run **in code** by the
@@ -149,12 +173,12 @@ tool string the agent picked). S1 ships no gated tools; the S5 agent packs plug 
   reminder then posts as a **new message** instead of threading onto the original. Expect a
   standalone reminder rather than a thread reply after a Slack outage.
 
-## Worker + sweeper loop
+## Worker + sweeper + scheduler loop
 
 `python -m aicom.main` runs `aicom.main.run_worker_forever`, a single long-lived loop
-that each iteration: recovers stale runs, sends due approval reminders, and lets the
-worker claim and execute one queued run. An unhandled exception from any of those
-steps is logged and the loop continues on the next iteration rather than exiting —
-there is no process supervisor restarting this service, so a single bad iteration
-(e.g. a transient DB error) must not take down the ability to ever again pick up
-queued work or Slack reminders.
+that each iteration: recovers stale runs, sends due approval reminders, fires any due
+schedules, and lets the worker claim and execute one queued run. An unhandled
+exception from any of those steps is logged and the loop continues on the next
+iteration rather than exiting — there is no process supervisor restarting this
+service, so a single bad iteration (e.g. a transient DB error) must not take down the
+ability to ever again pick up queued work, Slack reminders, or due schedules.
