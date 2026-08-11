@@ -1,6 +1,15 @@
 import { useSnapshot } from "./api/useSnapshot";
 import { AgentTable } from "./ui/AgentTable";
 import { Login } from "./ui/Login";
+import { OfficeView } from "./ui/OfficeView";
+
+function webglAvailable(): boolean {
+  try {
+    return !!document.createElement("canvas").getContext("webgl2");
+  } catch {
+    return false;
+  }
+}
 
 export function App() {
   const { snapshot, connected, needsLogin, error } = useSnapshot();
@@ -24,7 +33,11 @@ export function App() {
         )}
         {snapshot.paused_until && <span className="paused">paused</span>}
       </header>
-      <AgentTable snapshot={snapshot} />
+      {webglAvailable() ? (
+        <OfficeView snapshot={snapshot} onAnchors={() => undefined} />
+      ) : (
+        <AgentTable snapshot={snapshot} />
+      )}
     </div>
   );
 }

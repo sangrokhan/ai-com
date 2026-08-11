@@ -22,3 +22,5 @@ body {
 .login input, .login button { padding: 8px; font: inherit; }
 .error { color: #e06c75; }
 .loading { padding: 20px; }
+.office { position: relative; width: 100%; height: calc(100vh - 44px); }
+.office canvas { display: block; }
