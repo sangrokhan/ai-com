@@ -40,6 +40,7 @@ line-length = 100
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = ["smoke: hits the real claude binary; skipped in CI"]
 
 [tool.mypy]
 strict = true

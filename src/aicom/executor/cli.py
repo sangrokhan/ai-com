@@ -30,6 +30,11 @@ def build_argv(req: RunRequest, *, binary: str, mcp_config_path: Path) -> list[s
     ]
     if req.resume_session_id:
         argv += ["--resume", req.resume_session_id]
+    # `--mcp-config` (like `--allowedTools` and `--add-dir`) is a variadic
+    # option in the CLI's argument parser: with no `--` to stop it, it
+    # greedily swallows the prompt that follows as another config value
+    # instead of leaving it as the positional prompt argument.
+    argv.append("--")
     argv.append(req.prompt)
     return argv
 
