@@ -14,10 +14,16 @@ _PAYLOAD = "operator"
 
 
 def check_password(candidate: str, expected: str) -> bool:
-    """Constant-time comparison. An empty configured password rejects everything."""
+    """Constant-time comparison. An empty configured password rejects everything.
+
+    Compares UTF-8 bytes rather than str: hmac.compare_digest raises TypeError
+    when either str argument contains a non-ASCII character, which would turn
+    a non-ASCII password attempt into an unhandled 500 instead of a 401 -- and
+    would make a non-ASCII console password impossible to log in with at all.
+    """
     if not expected:
         return False
-    return hmac.compare_digest(candidate, expected)
+    return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
 
 
 def issue_session(secret: str) -> str:

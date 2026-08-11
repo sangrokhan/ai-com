@@ -133,7 +133,10 @@ port and attempt the password. On a home network the practical risk is low, but 
 password now" is not the same as "it is safe to expose". Before this is reachable from
 anywhere less trusted it needs TLS and something stronger in front of it. The `secure`
 cookie flag is configurable and defaults to off precisely because there is no TLS here;
-turning TLS on should turn that flag on with it.
+turning TLS on should turn that flag on with it. Logout is also only a client-side
+courtesy: it clears the cookie on the caller's browser, but the token is a stateless
+signed credential with no server-side record, so it remains valid until it expires on
+its own -- real revocation would need server-side session state that does not exist yet.
 
 ## 8. Error handling
 

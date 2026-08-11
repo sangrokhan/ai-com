@@ -29,6 +29,11 @@ def make_auth_router(settings: Settings) -> APIRouter:
 
     @router.post("/auth/logout")
     def logout(response: Response) -> dict:
+        # This only clears the cookie on the client that calls it. The token
+        # itself is a signed, stateless credential with no server-side record,
+        # so it remains valid (for anyone still holding it) until it expires
+        # on its own after session_max_age_seconds. Real revocation would
+        # require server-side session state, which this task does not add.
         response.delete_cookie(SESSION_COOKIE)
         return {"status": "ok"}
 

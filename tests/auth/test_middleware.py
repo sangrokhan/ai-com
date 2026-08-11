@@ -66,11 +66,30 @@ def test_login_with_the_wrong_password_is_rejected(
     assert client.get("/tasks").status_code == 401
 
 
-def test_logout_revokes_access(sessions: sessionmaker[Session]) -> None:
+def test_logout_clears_the_cookie_client_side(sessions: sessionmaker[Session]) -> None:
     client = _client(sessions)
-    client.post("/auth/login", json={"password": PASSWORD})
+    login = client.post("/auth/login", json={"password": PASSWORD})
+    token = login.cookies[SESSION_COOKIE]
+
     assert client.post("/auth/logout").status_code == 200
+    # The client's own cookie jar is cleared, so its next request is rejected...
     assert client.get("/tasks").status_code == 401
+
+    # ...but logout is a client-side courtesy only: the token itself is not
+    # revoked server-side, so re-presenting the SAME cookie value still
+    # succeeds. Real revocation needs server-side session state, which this
+    # task does not add -- this assertion documents that limitation rather
+    # than implying a guarantee we do not provide.
+    still_client = _client(sessions)
+    still_client.cookies.set(SESSION_COOKIE, token)
+    assert still_client.get("/tasks").status_code == 200
+
+
+def test_login_with_a_non_ascii_wrong_password_is_a_401_not_a_500(
+    sessions: sessionmaker[Session],
+) -> None:
+    response = _client(sessions).post("/auth/login", json={"password": "pässwörd"})
+    assert response.status_code == 401
 
 
 def test_slack_webhook_still_works_without_a_cookie(

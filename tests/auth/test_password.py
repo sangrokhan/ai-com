@@ -1,5 +1,7 @@
 import time
 
+import pytest
+
 from aicom.auth.password import (
     check_password,
     issue_session,
@@ -23,6 +25,18 @@ def test_empty_configured_password_rejects_everything() -> None:
     assert check_password("anything", "") is False
 
 
+def test_non_ascii_wrong_password_rejected_without_raising() -> None:
+    # hmac.compare_digest raises TypeError on non-ASCII str input; comparing
+    # as UTF-8 bytes must avoid that so a wrong non-ASCII password is a clean
+    # rejection, not an unhandled 500.
+    assert check_password("pässwörd", "hunter2") is False
+
+
+def test_non_ascii_correct_password_accepted() -> None:
+    # A non-ASCII console password (e.g. Korean) must be usable at all.
+    assert check_password("한글", "한글") is True
+
+
 def test_issued_session_verifies() -> None:
     token = issue_session(SECRET)
     assert verify_session(token, SECRET, max_age_seconds=60) is True
@@ -38,9 +52,14 @@ def test_tampered_session_rejected() -> None:
     assert verify_session(token, SECRET, max_age_seconds=60) is False
 
 
-def test_expired_session_rejected() -> None:
+def test_expired_session_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    # itsdangerous stamps and compares in integer seconds, so a real sleep()
+    # near a second boundary makes the elapsed integer age flaky (it can land
+    # on exactly max_age, which is not "expired"). Fake the clock instead of
+    # sleeping so the test is deterministic under any load.
     token = issue_session(SECRET)
-    time.sleep(1.1)
+    real_time = time.time
+    monkeypatch.setattr("itsdangerous.timed.time.time", lambda: real_time() + 5)
     assert verify_session(token, SECRET, max_age_seconds=1) is False
 
 
