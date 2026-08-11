@@ -91,6 +91,44 @@ def test_timeout_is_enforced_even_when_child_holds_stdout_open(
     assert outcome.reason is ExitReason.TIMEOUT
 
 
+def test_reader_thread_that_never_finishes_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A grandchild that inherited the pipe fds keeps stdout open after the
+    child exits, so the reader thread never sees EOF and outlives run().
+    That leak must be logged (naming the run), not silently ignored."""
+    import logging
+
+    stdout_r, stdout_w = os.pipe()
+    stderr_r, stderr_w = os.pipe()
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdout = os.fdopen(stdout_r, "r")
+            self.stderr = os.fdopen(stderr_r, "r")
+            self.returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            return self.returncode
+
+        def kill(self) -> None:  # pragma: no cover - not expected to be hit
+            pass
+
+    monkeypatch.setattr("aicom.executor.cli.subprocess.Popen", lambda *a, **kw: FakeProcess())
+    monkeypatch.setattr("aicom.executor.cli._JOIN_GRACE_SECONDS", 0.1)
+
+    req = _req(tmp_path, timeout_seconds=5)
+    try:
+        with caplog.at_level(logging.WARNING, logger="aicom.executor.cli"):
+            ClaudeCliExecutor(binary="claude").run(req, lambda _e: None)
+    finally:
+        os.close(stdout_w)
+        os.close(stderr_w)
+
+    assert str(req.run_id) in caplog.text
+    assert "did not finish" in caplog.text
+
+
 def test_large_concurrent_stdout_and_stderr_do_not_deadlock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

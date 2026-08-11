@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -10,6 +11,8 @@ from aicom.domain.enums import ExitReason
 from aicom.executor.base import Executor, RunOutcome, RunRequest
 from aicom.executor.secrets import assert_resolved
 from aicom.executor.stream import ParsedEvent, StreamParser
+
+logger = logging.getLogger(__name__)
 
 _JOIN_GRACE_SECONDS = 5
 
@@ -103,11 +106,29 @@ class ClaudeCliExecutor(Executor):
                 proc.kill()
                 proc.wait()
 
-            # The process has exited (or been killed): its pipes will hit
+            # The process has exited (or been killed): its pipes normally hit
             # EOF, so the reader threads finish promptly. Any output read
             # before the kill has already been fed to the parser/buffer.
+            #
+            # "Normally": a grandchild that inherited the pipe fds keeps the
+            # write end open, so EOF never arrives and the (daemon) reader
+            # thread outlives run() -- still calling on_event, which in the
+            # worker means database writes against an already-finalised run.
+            # We cannot join forever without reintroducing the hang the
+            # threads exist to avoid, so report the leak loudly instead; the
+            # worker's on_event guard makes the late callbacks harmless.
             stdout_thread.join(timeout=_JOIN_GRACE_SECONDS)
             stderr_thread.join(timeout=_JOIN_GRACE_SECONDS)
+            for name, thread in (("stdout", stdout_thread), ("stderr", stderr_thread)):
+                if thread.is_alive():
+                    logger.warning(
+                        "%s reader thread for run %s did not finish within %ss "
+                        "(a grandchild is probably holding the pipe open); "
+                        "it is leaked and any further events from it are dropped",
+                        name,
+                        req.run_id,
+                        _JOIN_GRACE_SECONDS,
+                    )
             stderr = "".join(stderr_chunks)
 
         return RunOutcome(
