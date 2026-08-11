@@ -38,6 +38,11 @@ export class OfficeScene {
   }
 
   setAgents(agents: AgentView[]): void {
+    // Invariant freeSlot relies on: gridSize(agents.length) ** 2 is always
+    // >= agents.length, so there are never more agents than cells and
+    // freeSlot below is never asked to resolve a slot on a genuinely full
+    // grid (see the "terminates even when the grid is genuinely full" case
+    // documented in layout.ts).
     const wanted = new Set(agents.map((a) => a.agent_id));
     for (const [id, object] of this.people) {
       if (!wanted.has(id)) {
