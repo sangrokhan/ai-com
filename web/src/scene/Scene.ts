@@ -1,7 +1,7 @@
 import * as THREE from "three";
 
 import type { AgentView } from "../api/client";
-import { DESK_SPACING, deskPosition, deskSlot, gridSize } from "./layout";
+import { DESK_SPACING, deskPosition, freeSlot, gridSize, type Slot, slotKey } from "./layout";
 import { loadModel } from "./models";
 
 export type Anchor = { agentId: string; x: number; y: number };
@@ -11,6 +11,7 @@ export class OfficeScene {
   private readonly scene = new THREE.Scene();
   private camera = new THREE.OrthographicCamera();
   private readonly people = new Map<string, THREE.Object3D>();
+  private readonly positions = new Map<string, Slot>();
   private desk?: THREE.Object3D;
   private character?: THREE.Object3D;
   private frame = 0;
@@ -42,13 +43,22 @@ export class OfficeScene {
       if (!wanted.has(id)) {
         this.scene.remove(object);
         this.people.delete(id);
+        this.positions.delete(id);
       }
     }
 
+    // Seed with every currently seated agent's cell so a newly added agent
+    // can never be placed on top of one that is already sitting there.
     const taken = new Set<string>();
+    for (const slot of this.positions.values()) {
+      taken.add(slotKey(slot));
+    }
+
     for (const agent of agents) {
       if (this.people.has(agent.agent_id)) continue;
-      const slot = this.freeSlot(agent.agent_id, agents.length, taken);
+      const slot = freeSlot(agent.agent_id, agents.length, taken);
+      taken.add(slotKey(slot));
+      this.positions.set(agent.agent_id, slot);
       const { x, z } = deskPosition(slot);
 
       const group = new THREE.Group();
@@ -67,20 +77,6 @@ export class OfficeScene {
       this.people.set(agent.agent_id, group);
     }
     this.centreCamera(agents.length);
-  }
-
-  /** Resolves hash collisions by walking to the next free cell. */
-  private freeSlot(agentId: string, total: number, taken: Set<string>) {
-    const size = gridSize(total);
-    let slot = deskSlot(agentId, total);
-    let guard = 0;
-    while (taken.has(`${slot.row}:${slot.col}`) && guard < size * size) {
-      const next = slot.col + 1;
-      slot = { row: (slot.row + Math.floor(next / size)) % size, col: next % size };
-      guard += 1;
-    }
-    taken.add(`${slot.row}:${slot.col}`);
-    return slot;
   }
 
   anchors(): Anchor[] {
