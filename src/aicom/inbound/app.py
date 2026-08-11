@@ -176,6 +176,10 @@ def create_app(sessions: sessionmaker[Session], settings: Settings) -> FastAPI:
 
     app.include_router(make_router(sessions))
 
+    from aicom.console.routes import make_console_router
+
+    app.include_router(make_console_router(sessions, settings))
+
     return app
 
 
