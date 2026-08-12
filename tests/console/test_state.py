@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
@@ -236,9 +237,20 @@ def test_newer_crash_failure_with_null_ended_at_is_reported_failed(
 
 
 def test_snapshot_is_stable_for_unchanged_data(session: Session) -> None:
+    """Two snapshots of unchanged underlying data differ only in `generated_at`.
+
+    Production calls `build_snapshot` with a fresh `datetime.now(UTC)` on every
+    SSE tick, so a test that reuses the same `now` for both calls (as this one
+    used to) proves nothing about that path -- of course two calls with an
+    identical argument produce identical output. The real contract, matching
+    the SSE delta logic in routes.py, is that everything *except*
+    `generated_at` is stable when nothing in the database changed.
+    """
     make_agent(session)
     session.commit()
 
     first = build_snapshot(session, now=NOW)
-    second = build_snapshot(session, now=NOW)
-    assert first == second
+    second = build_snapshot(session, now=NOW + timedelta(seconds=10))
+
+    assert first.generated_at != second.generated_at
+    assert replace(first, generated_at="") == replace(second, generated_at="")

@@ -35,14 +35,21 @@ export function OfficeView({
     const office = new OfficeScene();
     scene.current = office;
     void office.mount(container.current);
-    let frame = 0;
-    const publish = () => {
+    // office.anchors() projects every seated agent's world position through
+    // the camera -- real work, not free. The camera is orthographic and
+    // fixed once seated (it only moves on centreCamera/resize, both rare),
+    // so anchor positions barely change between frames. Anything faster
+    // than App's own ANCHOR_COMMIT_MS=100 throttle is wasted: those extra
+    // projections would just be dropped on the floor before ever reaching
+    // state. Publishing on an interval instead of every animation frame
+    // (60Hz) cuts that wasted work by roughly an order of magnitude while
+    // staying imperceptible for text labels.
+    const PUBLISH_MS = 100;
+    const interval = window.setInterval(() => {
       onAnchorsRef.current(office.anchors());
-      frame = requestAnimationFrame(publish);
-    };
-    publish();
+    }, PUBLISH_MS);
     return () => {
-      cancelAnimationFrame(frame);
+      window.clearInterval(interval);
       office.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- see comment above

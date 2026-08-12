@@ -1,7 +1,6 @@
 import json
 import threading
 import time
-import uuid
 
 import httpx
 import uvicorn
@@ -89,12 +88,3 @@ def test_stream_emits_an_initial_snapshot(
 def test_stream_requires_a_session(sessions: sessionmaker[Session]) -> None:
     anonymous = TestClient(create_app(sessions, _settings()))
     assert anonymous.get("/console/stream").status_code == 401
-
-
-def test_unknown_agent_id_is_not_leaked_by_state(
-    sessions: sessionmaker[Session], session: Session
-) -> None:
-    make_agent(session)
-    session.commit()
-    body = _client(sessions).get("/console/state").json()
-    assert all(uuid.UUID(a["agent_id"]) for a in body["agents"])

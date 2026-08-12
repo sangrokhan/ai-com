@@ -40,6 +40,12 @@ function webglAvailable(): boolean {
 export function App() {
   const { snapshot, connected, needsLogin, error } = useSnapshot();
   const [anchors, onAnchors] = useThrottledAnchors();
+  // Evaluated once per mount, not per render: creating a canvas and probing
+  // getContext("webgl2") allocates a real WebGL context, and browsers cap
+  // how many can be live at once (Chrome force-loses the oldest around 16).
+  // Calling this in JSX would burn through that cap in seconds under
+  // useThrottledAnchors' 10Hz re-renders and evict the scene's own context.
+  const [webgl] = useState(() => webglAvailable());
 
   if (needsLogin) return <Login />;
   if (!snapshot) {
@@ -60,7 +66,7 @@ export function App() {
         )}
         {snapshot.paused_until && <span className="paused">paused</span>}
       </header>
-      {webglAvailable() ? (
+      {webgl ? (
         <div className="stage">
           <OfficeView snapshot={snapshot} onAnchors={onAnchors} />
           <Overlay agents={snapshot.agents} anchors={anchors} />

@@ -35,6 +35,10 @@ def make_console_router(
     @router.get("/console/stream")
     async def console_stream() -> StreamingResponse:
         async def events() -> AsyncIterator[str]:
+            # `generated_at` changes on every tick by construction, so it must be
+            # excluded from the change comparison below or every tick would look
+            # "changed" and the keep-alive branch would never fire. It is still
+            # sent in the payload -- only the comparison ignores it.
             previous: dict | None = None
             while True:
                 try:
@@ -43,8 +47,9 @@ def make_console_router(
                     # A failed tick must not close the stream; the next one recovers.
                     logger.exception("console snapshot failed")
                 else:
-                    if payload != previous:
-                        previous = payload
+                    comparable = {k: v for k, v in payload.items() if k != "generated_at"}
+                    if comparable != previous:
+                        previous = comparable
                         yield f"data: {json.dumps(payload)}\n\n"
                     else:
                         yield ": keep-alive\n\n"

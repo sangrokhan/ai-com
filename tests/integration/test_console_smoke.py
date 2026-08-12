@@ -1,7 +1,12 @@
 """One real-browser check that the console actually renders.
 
 The three.js scene is not unit tested — this is the single test that would
-catch a bundle that builds but does not run.
+catch a bundle that builds but does not run. `text=researcher` alone is not
+enough: the `<AgentTable>` fallback (rendered when WebGL2 is unavailable)
+shows the same agent name, so a headless Chromium without WebGL2 support
+would pass this test without the scene ever running. This also asserts a
+`canvas` element and an `.overlay .pill` label exist, which only the
+three.js/`OfficeView` path renders — `AgentTable` has neither.
 """
 
 import threading
@@ -60,4 +65,10 @@ def test_operator_can_log_in_and_see_an_agent(server: str) -> None:
 
         page.wait_for_selector("text=researcher", timeout=15000)
         assert page.locator("header").is_visible()
+        # These only exist on the three.js path: AgentTable (the no-WebGL2
+        # fallback) renders neither a canvas nor an `.overlay .pill` label,
+        # so asserting them proves the scene itself ran, not just that some
+        # view showing "researcher" ran.
+        assert page.locator("canvas").is_visible()
+        assert page.locator(".overlay .pill").first.is_visible()
         browser.close()

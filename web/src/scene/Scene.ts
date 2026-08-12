@@ -105,6 +105,11 @@ export class OfficeScene {
   dispose(): void {
     cancelAnimationFrame(this.frame);
     window.removeEventListener("resize", this.resize);
+    // dispose() alone frees GPU resources but leaves the WebGL context
+    // itself live; forceContextLoss() releases it back to the browser so
+    // an unmounted OfficeView doesn't keep counting against the per-page
+    // WebGL context cap.
+    this.renderer?.forceContextLoss();
     this.renderer?.dispose();
     this.renderer?.domElement.remove();
   }

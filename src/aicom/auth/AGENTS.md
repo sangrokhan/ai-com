@@ -113,3 +113,19 @@ Starlette's `BaseHTTPMiddleware` · FastAPI.
 router.
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->
+
+### Limitation: `AuthMiddleware` does not cover WebSocket routes
+
+`AuthMiddleware` subclasses Starlette's `BaseHTTPMiddleware`, which only runs for
+`scope["type"] == "http"`. A WebSocket route (`scope["type"] == "websocket"`) would skip
+this middleware entirely — including its session check — and be reachable with no
+authentication at all, regardless of `EXEMPT_PATHS`.
+
+There are no WebSocket routes in this codebase today, so nothing is currently
+exploitable. But "every route requires a session by default" is only true for HTTP
+routes. If a WebSocket route is ever added (e.g. to push console updates instead of SSE),
+it needs its own explicit session check in the `websocket_endpoint` handler (verify the
+session cookie from the handshake before `accept()`), or `AuthMiddleware` needs to be
+rewritten as a pure ASGI middleware that inspects `scope["type"]` itself rather than
+relying on `BaseHTTPMiddleware`. Neither change is made here — this note exists so the
+gap is visible before someone adds that route.
