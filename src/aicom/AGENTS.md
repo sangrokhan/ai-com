@@ -31,6 +31,8 @@ have fake implementations used by every integration test.
 | `inbound/` | The signature-verified Slack interaction endpoint and the FastAPI app (see `inbound/AGENTS.md`) |
 | `orchestrator/` | Worker loop, sweeper, artifact commits, agent prompts (see `orchestrator/AGENTS.md`) |
 | `api/` | Task/run/approval REST endpoints, the seam for the future web console (see `api/AGENTS.md`) |
+| `auth/` | Password check, signed session cookie, the `AuthMiddleware` that gates every route (see `auth/AGENTS.md`) |
+| `console/` | Derives and serves the read-only console snapshot (poll + SSE) (see `console/AGENTS.md`) |
 
 ## Dependency Direction
 
@@ -48,14 +50,19 @@ Arrows point at what a module imports. Nothing points back up.
      ▲                          │
      │                     orchestrator/
    inbound/  ◄──── api/         │
-     ▲                          │
-     └──────────────────────────┘
+     ▲            ▲             │
+     │            │             │
+   auth/       console/         │
+     ▲            ▲             │
+     └────────────┴─────────────┘
                  main.py
 ```
 
 `orchestrator/worker.py` is where everything meets — it is the largest module and the
-one where cross-module invariants are easiest to break. `inbound/app.py` mounts
-`api/`'s router onto the same FastAPI app that serves the Slack webhook.
+one where cross-module invariants are easiest to break. `inbound/app.py` mounts `auth/`'s
+middleware and router first, then `api/`'s and `console/`'s routers, onto the same
+FastAPI app that serves the Slack webhook, then mounts `web/dist` (see `web/AGENTS.md`)
+as a static SPA at `/` when that directory exists.
 
 ## For AI Agents
 

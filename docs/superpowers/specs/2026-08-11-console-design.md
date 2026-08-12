@@ -167,3 +167,7 @@ its own -- real revocation would need server-side session state that does not ex
 - Historical playback, charts, or the reference's perimeter billboards.
 - Multiple users, roles, or account management.
 - TLS and anything beyond the single shared password.
+- Camera controls. §4.1 above describes drag-to-rotate and scroll-to-zoom, but S4a does
+  not implement them: `web/src/scene/Scene.ts` positions the camera once and only moves
+  it in response to an agent-count change or a window resize, never user input. Not
+  implemented in this task; the spec text is aspirational, not shipped.

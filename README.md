@@ -124,6 +124,61 @@ This is a deliberate scope decision for this task, not an oversight:
 row and returns `404`/`400` otherwise, so a typo'd or disabled agent id fails loudly
 at request time instead of silently queuing a run nothing will ever pick up.
 
+## Console
+
+A read-only web console (S4a) shows every enabled agent as a character at a desk in an
+isometric office, colour-coded by status (waiting for sign-off / working / paused /
+failed / idle), updated over server-sent events. It has no write path: it cannot queue
+tasks, edit agents, or approve anything — sign-off still only happens through the Slack
+flow described above.
+
+Set two more `AICOM_*` variables before starting the `api` service (see
+`.env.example`):
+
+```bash
+AICOM_CONSOLE_PASSWORD=pick-a-real-password
+AICOM_SESSION_SECRET=pick-a-long-random-string
+```
+
+Build the frontend once (or after pulling a change to `web/`):
+
+```bash
+cd web && npm install && npm run build && cd ..
+```
+
+This produces `web/dist`, which `aicom.inbound.app.create_app` mounts at `/` whenever the
+directory exists. Then bring the stack up as above and open `http://<host>:8000/` and log
+in with `AICOM_CONSOLE_PASSWORD`.
+
+### This is deliberately reachable from your LAN, over plain HTTP
+
+Unlike the REST API's `127.0.0.1`-only binding described above, `docker-compose.yml`
+publishes the `api` service's port as `8000:8000` — bound to `0.0.0.0`, reachable from
+any device on your network, including a phone. That is the point: this is meant to be
+glanced at from across the room, not just from the machine running Docker.
+
+This has a real cost, and it is not hidden by the password: the console is served over
+plain HTTP, so the password you type and the session cookie it issues both cross the
+network **in clear text**. Any device on that network — not just yours — can reach port
+8000 and see the login form. A password stops casual access, not a determined listener
+on the same network. `AICOM_SESSION_COOKIE_SECURE` defaults to `false` because there is
+no TLS in front of this by default; if you put TLS in front of it, turn that flag on with
+it. Do not expose this port beyond a network you trust.
+
+### Known gap
+
+Every route is behind the session middleware (see `src/aicom/auth/AGENTS.md`) except
+three exempt paths, and the console's own static frontend at `/` is not one of them. In
+practice this means a browser with no session cookie yet — i.e. any operator who hasn't
+logged in before — gets a `401` for the page itself and never sees the login form
+render; `tests/integration/test_console_smoke.py` (the first test to drive the built
+frontend in a real browser) caught this. Until it's fixed, logging in for the first time
+needs a cookie obtained another way, e.g. `curl -c cookies.txt -X POST
+http://<host>:8000/auth/login -H 'Content-Type: application/json' -d
+'{"password":"<AICOM_CONSOLE_PASSWORD>"}'` and then loading the page with that cookie
+in the browser (e.g. via the browser's dev tools, or a matching cookie file for `curl -b`
+requests to the JSON endpoints directly).
+
 ## Schedules
 
 Recurring work is created once and fired by the scheduler on a cron cadence, instead
