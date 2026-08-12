@@ -119,9 +119,21 @@ database query whose cost grows with the agent count.
 
 A single password lives in `AICOM_CONSOLE_PASSWORD`; a separate `AICOM_SESSION_SECRET`
 signs the cookie. The check is constant-time. The cookie is `HttpOnly` and `SameSite=Lax`.
-Authentication is enforced by middleware on every route, with three exemptions: the Slack
+Authentication is enforced by middleware on every route, with four exemptions: the Slack
 interaction webhook (which has its own signature verification and cannot present a
-cookie), `POST /auth/login`, and `GET /health` (the container healthcheck).
+cookie), `POST /auth/login`, `GET /health` (the container healthcheck), and the built
+console frontend itself (the SPA shell at `/` and its `/assets/*` bundle).
+
+The frontend exemption exists because the other three are not enough to reach a working
+login: a cookie-less browser needs the page in order to get the login form, and needs the
+login form in order to get a cookie. The bundle it serves unauthenticated carries no
+data — only the login form and application code, which call the same protected data
+endpoints (`/console/state`, `/console/stream`, `/tasks`, `/runs/*`, `/approvals`,
+`/schedules`) any other client would, and get the same `401` without a session. The
+exemption is filesystem-backed (`aicom.auth.middleware.is_static_bundle_request`), not a
+path-prefix rule: a request is only exempt if it names a file that actually exists inside
+the mounted build output, so a future route that happens to share the `/assets/` prefix
+is not accidentally waved through — it still needs a session like everything else.
 
 This closes the hole S1 and S3 shipped with, where `POST /tasks` — an endpoint that queues
 work for an autonomous agent — was reachable by anyone who could reach the port.

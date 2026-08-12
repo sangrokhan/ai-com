@@ -15,7 +15,7 @@ on (almost) every request. One operator, one password — no accounts, no roles.
 |------|-------------|
 | `password.py` | `check_password`, `issue_session`, `verify_session`, `SESSION_COOKIE` |
 | `routes.py` | `make_auth_router(settings)` — `POST /auth/login`, `POST /auth/logout` |
-| `middleware.py` | `AuthMiddleware`, `EXEMPT_PATHS` |
+| `middleware.py` | `AuthMiddleware`, `EXEMPT_PATHS`, `is_static_bundle_request` |
 
 ## Public Interface
 
@@ -33,8 +33,12 @@ def make_auth_router(settings: Settings) -> APIRouter: ...
 # middleware.py
 EXEMPT_PATHS: frozenset[str]  # {"/slack/interactions", "/auth/login", "/health"}
 
+def is_static_bundle_request(method: str, path: str, static_dir: Path) -> bool: ...
+
 class AuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: object, *, secret: str, max_age_seconds: int) -> None: ...
+    def __init__(
+        self, app: object, *, secret: str, max_age_seconds: int, static_dir: Path
+    ) -> None: ...
 ```
 
 ## For AI Agents
@@ -47,7 +51,7 @@ string against the candidate. An unset `AICOM_CONSOLE_PASSWORD` therefore locks 
 console entirely rather than accepting any password (including an empty one). This is
 intentional: "not configured" must never mean "open".
 
-### The exemption list is deliberately three paths, and no more
+### The exemption list is deliberately three fixed paths, plus the static bundle
 
 `EXEMPT_PATHS` in `middleware.py` contains exactly three entries, matching spec §7:
 
@@ -59,12 +63,28 @@ intentional: "not configured" must never mean "open".
 - `/health` — polled by the container runtime's healthcheck, which has no browser and no
   password.
 
-Every other path — including the console's own static frontend mounted at `/` in
-`aicom.inbound.app.create_app` — requires a valid session. Do not add paths to this set
-casually; each entry is a hole in "every route requires a session", and the three above
-are the only ones the design accepts. (See the root `AGENTS.md` roadmap note and
-`docs/superpowers/specs/2026-08-11-console-design.md` §7 for the consequence this has for
-a first-time, cookie-less browser visit.)
+A fourth, structurally different exemption sits alongside it: `is_static_bundle_request`
+lets an unauthenticated `GET`/`HEAD` through when it names a real file inside
+`settings.console_static_dir` (the built console — `/` and `/assets/*`, mounted by
+`aicom.inbound.app.create_app`). Without it, a cookie-less browser could never load
+enough of the app to reach `<Login />` in the first place: `/` and `/assets/*` would 401
+before the SPA shell was ever fetched, meaning there'd be no way to obtain a cookie
+without one already. The bundle is safe to serve openly — it is the login form plus
+application code, no data — and every endpoint it actually calls
+(`/console/state`, `/console/stream`, `/tasks`, `/runs/*`, `/approvals`, `/schedules`)
+still goes through the normal session check and 401s without a cookie exactly as before.
+
+This exemption is intentionally **not** `path.startswith("/assets/")`: that shape would
+silently cover any future route added under the same prefix. `is_static_bundle_request`
+instead resolves the request path against `static_dir` and only exempts it if that exact
+file is really there (and the resolved path can't escape `static_dir` via `..`), so a
+same-shaped path that is actually an API route — not a built asset — still needs a
+session. See `tests/auth/test_middleware.py` for the case that specifically constructs
+such a route to prove it stays gated.
+
+Do not add paths to `EXEMPT_PATHS` casually, and do not widen
+`is_static_bundle_request` into a prefix match; each is a hole in "every route requires a
+session by default", and these four are the only ones the design accepts.
 
 ### Session mechanics
 

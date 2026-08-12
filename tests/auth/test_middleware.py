@@ -3,6 +3,7 @@ import hmac
 import json
 import time
 import urllib.parse
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,18 +16,20 @@ PASSWORD = "hunter2"
 SLACK_SECRET = "slack-secret"
 
 
-def _settings() -> Settings:
+def _settings(static_dir: Path | None = None) -> Settings:
+    kwargs = {"console_static_dir": static_dir} if static_dir is not None else {}
     return Settings(
         console_password=PASSWORD,
         session_secret="session-secret",
         slack_signing_secret=SLACK_SECRET,
         slack_approver_ids=("U_OWNER",),
         database_url="postgresql+psycopg://unused/unused",
+        **kwargs,
     )
 
 
-def _client(sessions: sessionmaker[Session]) -> TestClient:
-    return TestClient(create_app(sessions, _settings()))
+def _client(sessions: sessionmaker[Session], static_dir: Path | None = None) -> TestClient:
+    return TestClient(create_app(sessions, _settings(static_dir)))
 
 
 def test_health_is_reachable_without_a_cookie(sessions: sessionmaker[Session]) -> None:
@@ -112,3 +115,66 @@ def test_slack_webhook_still_works_without_a_cookie(
         },
     )
     assert response.status_code == 200
+
+
+def test_the_static_bundle_is_served_without_a_cookie(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    # The chicken-and-egg bug this exists to fix: a cookie-less browser must be
+    # able to load the SPA shell to reach the login form in the first place.
+    marker = "TASK-7-BUNDLE-MARKER"
+    (tmp_path / "index.html").write_text(f"<!doctype html><title>{marker}</title>")
+    response = _client(sessions, tmp_path).get("/")
+    assert response.status_code == 200
+    assert marker in response.text
+
+
+def test_a_bundle_asset_is_served_without_a_cookie(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    (tmp_path / "index.html").write_text("<!doctype html><title>console</title>")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "app.js").write_text("console.log('hi');")
+    response = _client(sessions, tmp_path).get("/assets/app.js")
+    assert response.status_code == 200
+    assert "hi" in response.text
+
+
+def test_data_endpoints_still_require_a_cookie_with_a_bundle_mounted(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    (tmp_path / "index.html").write_text("<!doctype html><title>console</title>")
+    client = _client(sessions, tmp_path)
+    assert client.get("/console/state").status_code == 401
+    assert client.get("/tasks").status_code == 401
+
+
+def test_a_route_shaped_like_an_asset_path_stays_protected(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    # A naive `path.startswith("/assets/")` exemption would wrongly let this
+    # through. The exemption is filesystem-backed instead: no bundle is mounted
+    # here at all (static_dir doesn't exist), so a hypothetical future API route
+    # that happens to live under the same "/assets/" prefix as the built assets
+    # still has to clear the session check like any other route.
+    app = create_app(sessions, _settings(tmp_path / "absent"))
+
+    @app.get("/assets/admin")
+    def _future_route_under_the_assets_prefix() -> dict:
+        return {"secret": "yes"}
+
+    response = TestClient(app).get("/assets/admin")
+    assert response.status_code == 401
+
+
+def test_an_asset_shaped_path_naming_no_real_file_is_not_exempt(
+    sessions: sessionmaker[Session], tmp_path: Path
+) -> None:
+    # Same point with a bundle actually mounted: "/assets/does-not-exist.js"
+    # looks exactly like a built asset but names no real file, so it must not
+    # be waved through by a broad prefix rule.
+    (tmp_path / "index.html").write_text("<!doctype html><title>console</title>")
+    (tmp_path / "assets").mkdir()
+    response = _client(sessions, tmp_path).get("/assets/does-not-exist.js")
+    assert response.status_code == 401

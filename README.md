@@ -147,8 +147,10 @@ cd web && npm install && npm run build && cd ..
 ```
 
 This produces `web/dist`, which `aicom.inbound.app.create_app` mounts at `/` whenever the
-directory exists. Then bring the stack up as above and open `http://<host>:8000/` and log
-in with `AICOM_CONSOLE_PASSWORD`.
+directory exists. Then bring the stack up as above and open `http://<host>:8000/` in a
+browser and log in with `AICOM_CONSOLE_PASSWORD` — the login form itself, and the JS/CSS
+it needs, load without a session (see `src/aicom/auth/AGENTS.md`); everything the app
+then calls to show live data still requires the password.
 
 ### This is deliberately reachable from your LAN, over plain HTTP
 
@@ -164,20 +166,6 @@ network **in clear text**. Any device on that network — not just yours — can
 on the same network. `AICOM_SESSION_COOKIE_SECURE` defaults to `false` because there is
 no TLS in front of this by default; if you put TLS in front of it, turn that flag on with
 it. Do not expose this port beyond a network you trust.
-
-### Known gap
-
-Every route is behind the session middleware (see `src/aicom/auth/AGENTS.md`) except
-three exempt paths, and the console's own static frontend at `/` is not one of them. In
-practice this means a browser with no session cookie yet — i.e. any operator who hasn't
-logged in before — gets a `401` for the page itself and never sees the login form
-render; `tests/integration/test_console_smoke.py` (the first test to drive the built
-frontend in a real browser) caught this. Until it's fixed, logging in for the first time
-needs a cookie obtained another way, e.g. `curl -c cookies.txt -X POST
-http://<host>:8000/auth/login -H 'Content-Type: application/json' -d
-'{"password":"<AICOM_CONSOLE_PASSWORD>"}'` and then loading the page with that cookie
-in the browser (e.g. via the browser's dev tools, or a matching cookie file for `curl -b`
-requests to the JSON endpoints directly).
 
 ## Schedules
 

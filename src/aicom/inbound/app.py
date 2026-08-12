@@ -169,6 +169,7 @@ def create_app(sessions: sessionmaker[Session], settings: Settings) -> FastAPI:
         AuthMiddleware,
         secret=settings.session_secret,
         max_age_seconds=settings.session_max_age_seconds,
+        static_dir=settings.console_static_dir,
     )
     app.include_router(make_auth_router(settings))
 
