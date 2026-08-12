@@ -3,6 +3,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -456,6 +457,37 @@ def test_gate_server_is_injected_for_an_agent_with_no_mcp_config(
     assert GATE_SERVER_NAME in config
     assert config[GATE_SERVER_NAME]["args"] == ["-m", "aicom.gate.server"]
     assert GATE_TOOL in executor.requests[0].allowed_tools
+
+
+def test_gate_server_env_carries_the_workers_own_database_url(
+    sessions: sessionmaker[Session],
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate MCP server is a separate process; it has no other route to
+    the run's database than what the worker puts in its spawn env. If it
+    fell back to reading AICOM_DATABASE_URL from the ambient environment
+    instead, it could silently bind to a different database than the one
+    the run actually lives in -- the approval INSERT then fails with a
+    foreign-key violation, the agent's run finishes `succeeded`, and there
+    is no approval row and no Slack notification. This must never depend on
+    the ambient environment agreeing with the worker's own settings."""
+    # Ambient env deliberately disagrees with the worker's Settings, so a
+    # fix that (re)reads os.environ instead of using settings.database_url
+    # would be caught here.
+    monkeypatch.setenv("AICOM_DATABASE_URL", "postgresql+psycopg://wrong-host/wrong-db")
+
+    run = _queued(session, mcp_config={})
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    config = executor.requests[0].mcp_config
+    assert config[GATE_SERVER_NAME]["env"]["AICOM_DATABASE_URL"] == (
+        "postgresql+psycopg://unused/unused"
+    )
 
 
 def test_injected_gate_entry_wins_over_a_conflicting_agent_key(

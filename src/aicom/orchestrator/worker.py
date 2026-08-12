@@ -44,15 +44,31 @@ GATE_TOOL_FUNCTION = "request_approval_tool"  # the @mcp.tool() function name
 GATE_TOOL = f"mcp__{GATE_SERVER_NAME}__{GATE_TOOL_FUNCTION}"
 
 
-def gate_server_spec() -> dict[str, object]:
+def gate_server_spec(database_url: str) -> dict[str, object]:
     """Spawn spec for the gate MCP server, injected into every run.
 
     Equivalent to `python -m aicom.gate.server`, but pinned to the interpreter
     running the worker so the server always imports the same aicom package and
     virtualenv. The server reads AICOM_RUN_ID from the environment, which
     ClaudeCliExecutor injects per run.
+
+    `database_url` is the worker's OWN `settings.database_url`, forwarded
+    explicitly via this spec's per-server `env`. The gate server otherwise
+    builds its own `Settings()` from the ambient process environment of the
+    spawned subprocess, which need not agree with the worker's -- e.g. a
+    `Worker` constructed with an explicit `Settings` (every test does this,
+    and any embedding of this code plausibly would). When the two disagree,
+    the gate server connects to a different database than the run it is
+    recording an approval for, and the approval INSERT fails with a foreign
+    key violation while the agent's run finishes as if nothing needed
+    sign-off. Setting this here, rather than relying on ambient
+    AICOM_DATABASE_URL, makes that divergence structurally impossible.
     """
-    return {"command": sys.executable, "args": ["-m", "aicom.gate.server"]}
+    return {
+        "command": sys.executable,
+        "args": ["-m", "aicom.gate.server"],
+        "env": {"AICOM_DATABASE_URL": database_url},
+    }
 
 
 class GatedToolMisconfiguration(Exception):
@@ -151,7 +167,8 @@ class Worker:
         # being handed GATE_TOOL in --allowedTools. Injected last so it always
         # wins over any same-named key the agent config carries.
         mcp_config, env = resolve_secrets(
-            {**agent.mcp_config, GATE_SERVER_NAME: gate_server_spec()}, _lookup_secret
+            {**agent.mcp_config, GATE_SERVER_NAME: gate_server_spec(self._settings.database_url)},
+            _lookup_secret,
         )
         run.workspace_path = str(workspace)
         allowed = tuple(agent.allowed_tools) + (GATE_TOOL,)
