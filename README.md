@@ -124,6 +124,51 @@ This is a deliberate scope decision for this task, not an oversight:
 row and returns `404`/`400` otherwise, so a typo'd or disabled agent id fails loudly
 at request time instead of silently queuing a run nothing will ever pick up.
 
+## Console
+
+A read-only web console (S4a) shows every enabled agent as a character at a desk in an
+isometric office, colour-coded by status (waiting for sign-off / working / paused /
+failed / idle), updated over server-sent events. It has no write path: it cannot queue
+tasks, edit agents, or approve anything — sign-off still only happens through the Slack
+flow described above.
+
+Set four more `AICOM_*` variables before starting the `api` service (see
+`.env.example`) — two need a real value, two ship with a working default:
+
+```bash
+AICOM_CONSOLE_PASSWORD=pick-a-real-password
+AICOM_SESSION_SECRET=pick-a-long-random-string
+AICOM_SESSION_COOKIE_SECURE=false   # default; turn on only alongside TLS
+AICOM_SSE_INTERVAL_SECONDS=10       # default
+```
+
+Build the frontend once (or after pulling a change to `web/`):
+
+```bash
+cd web && npm install && npm run build && cd ..
+```
+
+This produces `web/dist`, which `aicom.inbound.app.create_app` mounts at `/` whenever the
+directory exists. Then bring the stack up as above and open `http://<host>:8000/` in a
+browser and log in with `AICOM_CONSOLE_PASSWORD` — the login form itself, and the JS/CSS
+it needs, load without a session (see `src/aicom/auth/AGENTS.md`); everything the app
+then calls to show live data still requires the password.
+
+### This is deliberately reachable from your LAN, over plain HTTP
+
+Unlike the REST API's `127.0.0.1`-only binding described above, `docker-compose.yml`
+publishes the `api` service's port as `8000:8000` — bound to `0.0.0.0`, reachable from
+any device on your network, including a phone. That is the point: this is meant to be
+glanced at from across the room, not just from the machine running Docker.
+
+This has a real cost, and it is not hidden by the password: the console is served over
+plain HTTP, so the password you type and the session cookie it issues both cross the
+network **in clear text**. Any device on that network — not just yours — can reach port
+8000 and see the login form. A password stops casual access, not a determined listener
+on the same network. `AICOM_SESSION_COOKIE_SECURE` defaults to `false` because there is
+no TLS in front of this by default; if you put TLS in front of it, turn that flag on with
+it. Do not expose this port beyond a network you trust.
+
 ## Schedules
 
 Recurring work is created once and fired by the scheduler on a cron cadence, instead

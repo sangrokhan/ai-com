@@ -23,17 +23,26 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # The HTTP process: Slack interaction webhook + REST API
+  # The HTTP process: Slack interaction webhook + REST API + console
   # (src/aicom/inbound/app.py:app_factory).
   #
-  # NOT hardened for public exposure: /tasks, /runs/*, and /approvals have no
-  # authentication (only POST /slack/interactions is signature-verified), so
-  # the published port is bound to localhost only. Put a real access-control
-  # layer in front of it before exposing it any wider.
+  # Every route except /slack/interactions, /auth/login, /health, and the
+  # built console frontend itself (/ and /assets/*, exempt because it is
+  # only the login form and application code, no data) now requires a
+  # session cookie (src/aicom/auth/middleware.py). The port is published on
+  # the LAN (0.0.0.0), not bound to localhost, so the console can be reached
+  # from a phone -- deliberately, per spec §7. It is still served over plain
+  # HTTP: the password and session cookie cross the network in clear text,
+  # and any device on the LAN can reach the port.
   api:
     build: .
     env_file:
       - .env
+    environment:
+      AICOM_CONSOLE_PASSWORD: ${AICOM_CONSOLE_PASSWORD}
+      AICOM_SESSION_SECRET: ${AICOM_SESSION_SECRET}
+      AICOM_SESSION_COOKIE_SECURE: ${AICOM_SESSION_COOKIE_SECURE:-false}
+      AICOM_SSE_INTERVAL_SECONDS: ${AICOM_SSE_INTERVAL_SECONDS:-10}
     command:
       [
         "uvicorn",
@@ -45,7 +54,7 @@ services:
         "8000",
       ]
     ports:
-      - "127.0.0.1:8000:8000"
+      - "8000:8000"
     depends_on:
       migrate:
         condition: service_completed_successfully

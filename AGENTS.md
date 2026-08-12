@@ -126,14 +126,26 @@ are not started, though their schema seams exist.
 | S1 | Core orchestrator: domain, store, executor, worker, artifacts | Shipped |
 | S2 | Slack approval bridge: gate, notify, inbound, sweeper | Shipped |
 | S3 | Scheduler: cron periodic jobs | Shipped |
-| S4 | Web console: sprite dashboard, persona/skill editing, SSE. `api/` is the seam | Not started |
+| S4 | Web console: sprite dashboard, persona/skill editing, SSE. `api/` is the seam | Partially shipped (S4a) |
 | S5 | Profit agent packs: trading, content, freelance, opportunity research | Not started |
+
+S4a shipped a read-only isometric-office console (`auth/`, `console/`, `web/`): login,
+live agent status via SSE, no editing and no web sign-off. S4b (editing) and S4c (web
+sign-off) are not started.
 
 ### Known Limitations
 
-- **The REST endpoints have no authentication.** `POST /tasks` queues work for an
-  autonomous agent. Bind to localhost or front it with real access control. Only the
-  Slack webhook path is signature-verified.
+- **Every route now requires a session**, enforced by `AuthMiddleware`
+  (`src/aicom/auth/middleware.py`) in front of `/tasks`, `/runs/*`, `/approvals`,
+  `/schedules`, and `/console/*` alike. Four things are exempt: three fixed paths
+  (`/slack/interactions`, `/auth/login`, `/health`) plus the built console frontend
+  itself (`/` and `/assets/*`) — exempt because it carries no data, only the login form
+  and application code, and everything it actually calls still requires a session. See
+  `src/aicom/auth/AGENTS.md`. What remains open: the console is deliberately served over
+  plain HTTP on the LAN (bound to `0.0.0.0`, not `127.0.0.1`, so it reaches a phone), so
+  the password and session cookie cross the network in clear text and any device on that
+  network can reach the port. See the README's "Console" section and
+  `docs/superpowers/specs/2026-08-11-console-design.md` §7.
 - S1 ships no gated tools yet, so `agent.gated_tools` is normally empty. Before S5
   ships one, verify end to end that an agent calling `request_approval_tool` actually
   parks its run — the smoke test proves the CLI accepts the gate config, not that the

@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # independent of whether the agent has emitted any stream events. A long
     # silent run must not look stale to Task 13's sweeper.
     worker_heartbeat_seconds: float = 15.0
+    console_password: str = ""
+    session_secret: str = ""
+    session_max_age_seconds: int = 60 * 60 * 24 * 14
+    session_cookie_secure: bool = False
+    sse_interval_seconds: float = 10.0
+    console_static_dir: Path = Path("./web/dist")
 
 
 def load_settings() -> Settings:

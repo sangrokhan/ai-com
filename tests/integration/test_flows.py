@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,6 +23,7 @@ from tests.inbound.test_app import SECRET, _action, _post
 from tests.store.test_models import make_agent
 
 NOW = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+CONSOLE_PASSWORD = "test-console-password"
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -36,7 +38,16 @@ def _settings(tmp_path: Path) -> Settings:
         slack_signing_secret=SECRET,
         slack_approver_ids=("U_OWNER",),
         database_url="postgresql+psycopg://unused/unused",
+        console_password=CONSOLE_PASSWORD,
+        session_secret="session-secret",
     )
+
+
+def _logged_in_client(app: FastAPI) -> TestClient:
+    client = TestClient(app)
+    login = client.post("/auth/login", json={"password": CONSOLE_PASSWORD})
+    assert login.status_code == 200
+    return client
 
 
 class GateThenFinishExecutor(FakeExecutor):
@@ -77,7 +88,7 @@ def test_full_sign_off_cycle(
     notifier = FakeNotifier()
     executor = GateThenFinishExecutor(sessions)
     worker = Worker(sessions, executor, notifier, settings, worker_id="w1")
-    client = TestClient(create_app(sessions, settings))
+    client = _logged_in_client(create_app(sessions, settings))
 
     created = client.post(
         "/tasks",
@@ -123,7 +134,7 @@ def test_usage_limit_pause_then_automatic_resume(
     notifier = FakeNotifier()
     executor = FakeExecutor()
     worker = Worker(sessions, executor, notifier, settings, worker_id="w1")
-    client = TestClient(create_app(sessions, settings))
+    client = _logged_in_client(create_app(sessions, settings))
     client.post("/tasks", json={"agent_id": str(agent.id), "title": "t", "goal": "g"})
 
     session.expire_all()
