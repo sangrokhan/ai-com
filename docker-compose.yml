@@ -26,12 +26,14 @@ services:
   # The HTTP process: Slack interaction webhook + REST API + console
   # (src/aicom/inbound/app.py:app_factory).
   #
-  # Every route except /slack/interactions, /auth/login, and /health now
-  # requires a session cookie (src/aicom/auth/middleware.py). The port is
-  # published on the LAN (0.0.0.0), not bound to localhost, so the console
-  # can be reached from a phone -- deliberately, per spec §7. It is still
-  # served over plain HTTP: the password and session cookie cross the
-  # network in clear text, and any device on the LAN can reach the port.
+  # Every route except /slack/interactions, /auth/login, /health, and the
+  # built console frontend itself (/ and /assets/*, exempt because it is
+  # only the login form and application code, no data) now requires a
+  # session cookie (src/aicom/auth/middleware.py). The port is published on
+  # the LAN (0.0.0.0), not bound to localhost, so the console can be reached
+  # from a phone -- deliberately, per spec §7. It is still served over plain
+  # HTTP: the password and session cookie cross the network in clear text,
+  # and any device on the LAN can reach the port.
   api:
     build: .
     env_file:

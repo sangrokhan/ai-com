@@ -154,11 +154,17 @@ def test_a_route_shaped_like_an_asset_path_stays_protected(
     sessions: sessionmaker[Session], tmp_path: Path
 ) -> None:
     # A naive `path.startswith("/assets/")` exemption would wrongly let this
-    # through. The exemption is filesystem-backed instead: no bundle is mounted
-    # here at all (static_dir doesn't exist), so a hypothetical future API route
-    # that happens to live under the same "/assets/" prefix as the built assets
-    # still has to clear the session check like any other route.
-    app = create_app(sessions, _settings(tmp_path / "absent"))
+    # through. The exemption is filesystem-backed instead: a bundle IS mounted
+    # here (index.html and a real assets/ directory both exist), so this
+    # exercises the actual file-existence check rather than short-circuiting on
+    # `static_dir.is_dir()` being False. A hypothetical future API route that
+    # happens to live under the same "/assets/" prefix as the built assets --
+    # but names no real file in the bundle -- still has to clear the session
+    # check like any other route.
+    (tmp_path / "index.html").write_text("<!doctype html><title>console</title>")
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "app.js").write_text("console.log('hi');")
+    app = create_app(sessions, _settings(tmp_path))
 
     @app.get("/assets/admin")
     def _future_route_under_the_assets_prefix() -> dict:

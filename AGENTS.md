@@ -137,7 +137,10 @@ sign-off) are not started.
 
 - **Every route now requires a session**, enforced by `AuthMiddleware`
   (`src/aicom/auth/middleware.py`) in front of `/tasks`, `/runs/*`, `/approvals`,
-  `/schedules`, and `/console/*` alike. Only three paths are exempt — see
+  `/schedules`, and `/console/*` alike. Four things are exempt: three fixed paths
+  (`/slack/interactions`, `/auth/login`, `/health`) plus the built console frontend
+  itself (`/` and `/assets/*`) — exempt because it carries no data, only the login form
+  and application code, and everything it actually calls still requires a session. See
   `src/aicom/auth/AGENTS.md`. What remains open: the console is deliberately served over
   plain HTTP on the LAN (bound to `0.0.0.0`, not `127.0.0.1`, so it reaches a phone), so
   the password and session cookie cross the network in clear text and any device on that

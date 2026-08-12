@@ -8,8 +8,10 @@ from aicom.auth.password import SESSION_COOKIE, verify_session
 
 # Everything else requires a session. Exemptions are deliberate and few:
 # the Slack webhook verifies its own signature and cannot present a cookie,
-# the login endpoint is how a cookie is obtained, and the healthcheck is
-# called by the container runtime.
+# the login endpoint is how a cookie is obtained, the healthcheck is called
+# by the container runtime, and (via is_static_bundle_request below) the
+# built console frontend itself, because a cookie-less browser needs it to
+# reach the login form in the first place.
 EXEMPT_PATHS: frozenset[str] = frozenset(
     {"/slack/interactions", "/auth/login", "/health"}
 )
@@ -39,11 +41,15 @@ def is_static_bundle_request(method: str, path: str, static_dir: Path) -> bool:
     if not relative:
         return False
     static_root = static_dir.resolve()
-    candidate = (static_root / relative).resolve()
     try:
+        candidate = (static_root / relative).resolve()
         candidate.relative_to(static_root)
-    except ValueError:
-        return False  # would escape static_dir (path traversal)
+    except (ValueError, OSError):
+        # Path traversal outside static_dir, or a malformed path (e.g. an
+        # embedded null byte from a request like "/assets/%00.js") -- either
+        # way, not a real bundle file, so treat it like any other rejection
+        # rather than letting the exception become an unhandled 500.
+        return False
     return candidate.is_file()
 
 

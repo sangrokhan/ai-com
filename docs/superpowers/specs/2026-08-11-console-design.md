@@ -57,6 +57,8 @@ its place across reloads and restarts — an operator learns where to look.
 
 Kenney models are loaded once as glTF and instanced per desk. The camera is a fixed
 isometric view with drag-to-rotate and scroll-to-zoom; there is no free-fly camera.
+**Not implemented in S4a** — see §10 (Out of scope): the camera is positioned once and
+only moves in response to an agent-count change or a window resize, never user input.
 
 ### 4.2 What is drawn per agent
 

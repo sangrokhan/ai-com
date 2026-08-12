@@ -132,12 +132,14 @@ failed / idle), updated over server-sent events. It has no write path: it cannot
 tasks, edit agents, or approve anything — sign-off still only happens through the Slack
 flow described above.
 
-Set two more `AICOM_*` variables before starting the `api` service (see
-`.env.example`):
+Set four more `AICOM_*` variables before starting the `api` service (see
+`.env.example`) — two need a real value, two ship with a working default:
 
 ```bash
 AICOM_CONSOLE_PASSWORD=pick-a-real-password
 AICOM_SESSION_SECRET=pick-a-long-random-string
+AICOM_SESSION_COOKIE_SECURE=false   # default; turn on only alongside TLS
+AICOM_SSE_INTERVAL_SECONDS=10       # default
 ```
 
 Build the frontend once (or after pulling a change to `web/`):
