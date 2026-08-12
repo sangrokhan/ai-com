@@ -184,3 +184,22 @@ def test_an_asset_shaped_path_naming_no_real_file_is_not_exempt(
     (tmp_path / "assets").mkdir()
     response = _client(sessions, tmp_path).get("/assets/does-not-exist.js")
     assert response.status_code == 401
+
+
+def test_a_malformed_path_with_an_embedded_null_byte_is_rejected_not_a_500(
+    tmp_path: Path,
+) -> None:
+    # Path.resolve() raises ValueError on an embedded null byte (the kind of
+    # path a request like "GET /assets/%00.js" decodes to). A bundle is
+    # mounted here (real index.html + assets/) so this runs the actual
+    # file-existence branch of is_static_bundle_request, not the earlier
+    # static_dir.is_dir() short-circuit -- pinning that the null byte is
+    # caught by the guard around resolve()/relative_to() and treated as "not
+    # a bundle file" (False), never left to propagate as an unhandled 500.
+    from aicom.auth.middleware import is_static_bundle_request
+
+    (tmp_path / "index.html").write_text("<!doctype html><title>console</title>")
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "app.js").write_text("console.log('hi');")
+
+    assert is_static_bundle_request("GET", "/assets/\x00.js", tmp_path) is False
