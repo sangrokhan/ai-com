@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -66,6 +67,38 @@ def test_seeding_again_updates_a_changed_definition(session: Session) -> None:
 
     session.expire_all()
     assert session.get(Agent, agent_id).persona == pack.agent.persona
+
+
+def test_reseeding_after_a_cron_edit_updates_cron_but_not_next_due_at(
+    session: Session,
+) -> None:
+    # Recomputing next_due_at on every seed would push a schedule that is due
+    # right now into the future and silently skip a firing, so it must be set
+    # only when the schedule row is first created.
+    pack = get_pack("opportunity")
+    agent_id, _ = seed_pack(session, pack, now=NOW)
+    session.commit()
+
+    original = session.scalar(
+        select(Schedule).where(Schedule.agent_id == agent_id)
+    )
+    assert original is not None
+    original_next_due_at = original.next_due_at
+    original_name = original.name
+
+    edited_schedule = replace(pack.schedules[0], cron="0 10 * * 1-5")
+    edited_pack = replace(pack, schedules=(edited_schedule, *pack.schedules[1:]))
+
+    seed_pack(session, edited_pack, now=NOW)
+    session.commit()
+    session.expire_all()
+
+    updated = session.scalar(
+        select(Schedule).where(Schedule.agent_id == agent_id, Schedule.name == original_name)
+    )
+    assert updated is not None
+    assert updated.cron == "0 10 * * 1-5"
+    assert updated.next_due_at == original_next_due_at
 
 
 def test_the_pack_reaches_no_gated_action() -> None:
