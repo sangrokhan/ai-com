@@ -172,6 +172,14 @@ class Worker:
         # placed in mcp_config: that dict is written verbatim to disk.
         env = {**env, "AICOM_DATABASE_URL": self._settings.database_url}
         run.workspace_path = str(workspace)
+        # A crashed/timed-out run's retry is a brand-new Run row (see
+        # _handle_failure), so it never carries a prior gate_error forward.
+        # A RESUMED run (approval decided, same run.id re-executed) is not:
+        # it's this same row, and a gate_error left over from an earlier,
+        # failed gate call in a PRIOR execution of it must not ride along
+        # into whatever this fresh execution reports, or an operator would
+        # see a stale warning about a call this execution never made.
+        run.gate_error = None
         allowed = tuple(agent.allowed_tools) + (GATE_TOOL,)
         granted = self._approved_gated_tool(session, run, gated)
         if granted is not None:
@@ -349,6 +357,25 @@ class Worker:
         run.exit_reason = outcome.reason.value
         session.flush()
 
+        # The gate MCP subprocess stamps this (best-effort, from its own
+        # process) when it could not durably record an approval -- e.g. the
+        # agent called request_approval_tool, got ApprovalRecordingFailed,
+        # and still terminated as though the run were clean. That error was
+        # loud to the model, but the model choosing to proceed anyway means
+        # this log line is the only place an operator watching logs (rather
+        # than this run's raw event stream) learns anything needed sign-off
+        # and never got it. Checked here, before branching on outcome, so it
+        # covers every ending this execution can have -- not just the clean
+        # SUCCEEDED path where the blind spot was originally found.
+        if run.gate_error:
+            logger.error(
+                "run %s finished (%s) but the gate reported an unrecorded "
+                "approval attempt: %s",
+                run.id,
+                outcome.reason.value,
+                run.gate_error,
+            )
+
         if outcome.reason is ExitReason.USAGE_LIMIT:
             self._handle_usage_limit(session, run, outcome, now)
             return
@@ -398,22 +425,14 @@ class Worker:
         )
         run.task.status = TaskStatus.DONE
         summary = f"Completed. Artifacts: {sha or 'none'}"
-        # The gate MCP subprocess stamps this (best-effort, from its own
-        # process) when it could not durably record an approval -- e.g. the
-        # agent called request_approval_tool, got ApprovalRecordingFailed,
-        # and still terminated as though the run were clean. That error was
-        # loud to the model, but the model choosing to proceed anyway means
-        # this is the ONLY place an operator watching Slack/logs (rather
-        # than this run's raw event stream) learns anything needed sign-off
-        # and never got it. Never silently drop it into a normal "Completed"
-        # report.
+        # Already logged above (covers every outcome branch); this is the
+        # SUCCEEDED-specific piece: pushing it into the same Slack channel
+        # every other run report already uses, since a clean-looking
+        # "Completed" summary is precisely the blind spot the live
+        # experiment found -- a failure report from _handle_failure or an
+        # approval dispatch from _dispatch_approval already gives an
+        # operator SOME signal something happened on those other paths.
         if run.gate_error:
-            logger.error(
-                "run %s finished SUCCEEDED but the gate reported an unrecorded "
-                "approval attempt: %s",
-                run.id,
-                run.gate_error,
-            )
             summary = (
                 f"{summary}\n\n"
                 f"WARNING: a gate approval request failed to record during this "

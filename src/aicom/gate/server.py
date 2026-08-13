@@ -51,19 +51,54 @@ def _try_record_gate_error(run_id: uuid.UUID, kind: str, exc: Exception) -> None
     finalize time and, if set, surfaces it via its normal Slack run-report
     path and its own logs -- channels an operator actually watches.
 
+    IMPORTANT SCOPE LIMIT: this uses the SAME `_sessions` the rest of this
+    module uses, so it can only help when this gate server's DB connection
+    is sound but recording still failed for some other reason (a transition
+    race, a transient error, ...). It does NOT and CANNOT cover this gate
+    server being connected to the WRONG database (the original defect this
+    whole feature responds to): in that case `record_gate_error`'s UPDATE
+    matches zero rows in *that* database (the run doesn't exist there) and
+    there is nothing further this function can do about it from inside that
+    same wrong connection -- it can only log that it happened. The fix for
+    the wrong-database case is `gate_server_spec`/`_build_request` in
+    aicom.orchestrator.worker forwarding `settings.database_url` explicitly,
+    which removes the possibility rather than reporting it after the fact.
+
     Uses a FRESH session, deliberately separate from the one that just
     failed above (which may itself be unusable, e.g. mid-rollback). Any
     failure here is swallowed: this is a best-effort secondary signal, and
     must never replace the logger.exception call or the raised
     ApprovalRecordingFailed as the primary evidence trail.
+
+    The message stored deliberately excludes `str(exc)`: a driver-level or
+    DSN-parsing error can carry the raw connection string -- credentials and
+    all -- and this value is forwarded verbatim into a Slack message by the
+    worker. Only the exception's type name is safe to carry that far; the
+    full, unsanitized exception is already captured server-side (this
+    process's own logs only) by the logger.exception call in the caller.
     """
+    safe_message = (
+        f"{kind}: {type(exc).__name__} (see this gate server's own logs for "
+        f"run {run_id} for the full error -- deliberately not repeated here, "
+        "since it may contain connection credentials)"
+    )
     try:
         with _sessions() as session:
-            record_gate_error(session, run_id, f"{kind}: {exc}")
+            found = record_gate_error(session, run_id, safe_message)
             session.commit()
     except Exception:
         logger.exception(
             "run %s: also failed to persist gate_error for operator visibility", run_id
+        )
+        return
+    if not found:
+        logger.error(
+            "run %s: gate_error UPDATE matched no rows -- this gate server's DB "
+            "connection does not contain a run with this id at all, so the "
+            "approval failure above was NOT recorded anywhere an operator can "
+            "see it. This is very likely the gate server being connected to the "
+            "wrong database (see gate_server_spec in aicom.orchestrator.worker).",
+            run_id,
         )
 
 
@@ -86,7 +121,12 @@ def request_approval_tool(kind: str, proposal: str, payload: dict | None = None)
     flushed-but-uncommitted approval row is discarded when the session
     closes. Also makes a best-effort attempt to stamp `Run.gate_error` (see
     `_try_record_gate_error`) so the failure reaches the operator, not just
-    the model.
+    the model -- EXCEPT when this server's own DB connection is the wrong
+    one, in which case that attempt necessarily also fails silently (there
+    is nowhere on the wrong database to write to); only a log line on this
+    subprocess's own stderr survives that case. See `_try_record_gate_error`
+    for why, and `gate_server_spec` for how the wrong-database case is
+    supposed to be prevented rather than reported.
     """
     run_id: uuid.UUID | None = None
     try:
