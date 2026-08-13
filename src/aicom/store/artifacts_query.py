@@ -26,7 +26,7 @@ def recent_schedule_reports(
         .join(Run, Artifact.run_id == Run.id)
         .join(Task, Run.task_id == Task.id)
         .where(Task.schedule_id == schedule_id, Artifact.path == REPORT_FILENAME)
-        .order_by(Run.started_at.desc().nulls_last())
+        .order_by(Run.started_at.desc().nulls_last(), Run.id.desc())
         .limit(limit)
     )
     return [(run_id, path) for run_id, path in session.execute(stmt)]

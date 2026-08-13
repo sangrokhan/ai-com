@@ -107,3 +107,22 @@ def test_a_schedule_with_no_reports_returns_nothing(session: Session) -> None:
     session.commit()
 
     assert recent_schedule_reports(session, schedule.id, limit=10) == []
+
+
+def test_ties_in_started_at_break_deterministically_by_run_id(session: Session) -> None:
+    # Two runs sharing the same started_at (e.g. claimed in the same batch) must
+    # not depend on the database's arbitrary tie-break order, or the report
+    # shown to a monitoring agent at the limit boundary could flip between
+    # calls with no underlying change.
+    schedule = _schedule(session)
+    first = _run_with_report(session, schedule, started_at=NOW)
+    second = _run_with_report(session, schedule, started_at=NOW)
+    session.commit()
+
+    expected = sorted([first.id, second.id], reverse=True)
+
+    result_a = [run_id for run_id, _ in recent_schedule_reports(session, schedule.id, limit=10)]
+    result_b = [run_id for run_id, _ in recent_schedule_reports(session, schedule.id, limit=10)]
+
+    assert result_a == expected
+    assert result_b == expected
