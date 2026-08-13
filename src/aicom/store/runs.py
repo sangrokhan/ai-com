@@ -80,3 +80,22 @@ def touch_heartbeat(
 def stale_running_runs(session: Session, *, older_than: datetime) -> list[Run]:
     stmt = select(Run).where(Run.status == RunStatus.RUNNING, Run.heartbeat_at < older_than)
     return list(session.scalars(stmt))
+
+
+def record_gate_error(session: Session, run_id: uuid.UUID, message: str) -> bool:
+    """Stamp `Run.gate_error`. Called by the gate MCP subprocess -- a
+    separate OS process from the worker -- when it could not durably record
+    an approval, so the failure is discoverable on the orchestrator side
+    (the worker checks this at finalize time) and not just visible in the
+    agent's own transcript.
+
+    A blind UPDATE by primary key, with no status guard: unlike `transition`,
+    this must succeed regardless of what state the run is in, and unlike
+    `append_event` it never needs to agree with anyone else on ordering --
+    it's a single column on a single row, so two processes writing to
+    different columns of the same row cannot conflict at the SQL level.
+    Returns whether a row was found to update (false only if the run_id
+    itself is bogus, e.g. AICOM_RUN_ID was tampered with).
+    """
+    result = session.execute(update(Run).where(Run.id == run_id).values(gate_error=message))
+    return bool(result.rowcount)

@@ -1,8 +1,10 @@
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -81,6 +83,86 @@ def test_successful_run_persists_events_and_reports(
     assert refreshed.token_out == 9
     assert len(notifier.reports) == 1
     assert executor.requests[0].allowed_tools[-1] == "mcp__gate__request_approval_tool"
+
+
+def test_a_run_that_succeeds_after_an_unrecorded_gate_call_still_warns_the_operator(
+    sessions: sessionmaker[Session],
+    session: Session,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gate MCP subprocess stamps Run.gate_error (best-effort, from its
+    own process, mid-execution) when it could not durably record an
+    approval. Even if the model then terminates as though nothing were
+    wrong and the CLI exits 0, the worker must not silently report a clean
+    success -- that is exactly the blind spot the live experiment found: the
+    model apologized for the gate error and the run still finished
+    SUCCEEDED with zero operator signal anywhere but the raw event stream.
+
+    Setting gate_error via a wrapper around FakeExecutor.run (rather than
+    before ticking) matters: _build_request clears any gate_error left over
+    from a PRIOR execution of this same run row before a fresh execution
+    starts (see the resume/carryover fix in _build_request), so setting it
+    before tick() would just prove the wrong thing -- this needs to land the
+    way the real gate subprocess would, DURING this execution.
+    """
+    run = _queued(session)
+
+    class _GateErrorDuringExecution(FakeExecutor):
+        def run(self, req, on_event):  # type: ignore[no-untyped-def]
+            outcome = super().run(req, on_event)
+            with sessions() as gate_session:
+                r = gate_session.get(Run, req.run_id)
+                assert r is not None
+                r.gate_error = "spend: relation violates foreign key constraint"
+                gate_session.commit()
+            return outcome
+
+    executor: FakeExecutor = _GateErrorDuringExecution()
+    notifier = FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+
+    with caplog.at_level(logging.ERROR):
+        assert _worker(sessions, executor, notifier, tmp_path).tick(NOW) is True
+
+    session.expire_all()
+    refreshed = session.get(Run, run.id)
+    assert refreshed is not None
+    assert refreshed.status is RunStatus.SUCCEEDED  # unchanged: no new invariant here
+
+    assert len(notifier.reports) == 1
+    assert "gate" in notifier.reports[0].summary.lower()
+    assert "relation violates foreign key constraint" in notifier.reports[0].summary
+    assert any(str(run.id) in record.message for record in caplog.records)
+
+
+def test_gate_error_from_a_prior_execution_does_not_ride_along_into_a_later_report(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    """A run row can be executed more than once (a resume after a decided
+    approval re-executes the SAME run.id). A gate_error left over from an
+    earlier, failed execution of this row must not show up attached to a
+    later execution that never made a failing gate call itself -- that
+    would be a false warning about a call this run never made. _build_request
+    clears it up front, before the (possibly gate-call-free) execution it is
+    about to run."""
+    run = _queued(session)
+    run.gate_error = "stale: leftover from a previous execution of this run"
+    session.commit()
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+
+    assert _worker(sessions, executor, notifier, tmp_path).tick(NOW) is True
+
+    session.expire_all()
+    refreshed = session.get(Run, run.id)
+    assert refreshed is not None
+    assert refreshed.gate_error is None
+
+    assert len(notifier.reports) == 1
+    assert "WARNING" not in notifier.reports[0].summary
+    assert "stale" not in notifier.reports[0].summary
 
 
 def test_crash_retries_then_fails_after_max_attempts(
@@ -456,6 +538,44 @@ def test_gate_server_is_injected_for_an_agent_with_no_mcp_config(
     assert GATE_SERVER_NAME in config
     assert config[GATE_SERVER_NAME]["args"] == ["-m", "aicom.gate.server"]
     assert GATE_TOOL in executor.requests[0].allowed_tools
+
+
+def test_gate_server_env_carries_the_workers_own_database_url(
+    sessions: sessionmaker[Session],
+    session: Session,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate MCP server is a separate process; it has no other route to
+    the run's database than what the worker puts in its spawn env. If it
+    fell back to reading AICOM_DATABASE_URL from the ambient environment
+    instead, it could silently bind to a different database than the one
+    the run actually lives in -- the approval INSERT then fails with a
+    foreign-key violation, the agent's run finishes `succeeded`, and there
+    is no approval row and no Slack notification. This must never depend on
+    the ambient environment agreeing with the worker's own settings.
+
+    Asserted on `RunRequest.env` (merged into the subprocess environment by
+    ClaudeCliExecutor), NOT on `mcp_config`: the latter is written verbatim
+    to a config file on disk, and a Postgres URL routinely carries a
+    password -- it must never land there.
+    """
+    # Ambient env deliberately disagrees with the worker's Settings, so a
+    # fix that (re)reads os.environ instead of using settings.database_url
+    # would be caught here.
+    monkeypatch.setenv("AICOM_DATABASE_URL", "postgresql+psycopg://wrong-host/wrong-db")
+
+    run = _queued(session, mcp_config={})
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+
+    _worker(sessions, executor, notifier, tmp_path).tick(NOW)
+
+    request = executor.requests[0]
+    assert request.env["AICOM_DATABASE_URL"] == "postgresql+psycopg://unused/unused"
+    # And it must never be written to the on-disk MCP config.
+    assert "env" not in request.mcp_config[GATE_SERVER_NAME]
+    assert "postgresql" not in json.dumps(request.mcp_config)
 
 
 def test_injected_gate_entry_wins_over_a_conflicting_agent_key(

@@ -51,6 +51,15 @@ def gate_server_spec() -> dict[str, object]:
     running the worker so the server always imports the same aicom package and
     virtualenv. The server reads AICOM_RUN_ID from the environment, which
     ClaudeCliExecutor injects per run.
+
+    Deliberately carries NO database_url of its own: this dict is written
+    verbatim to the `mcp.json` config file on disk (see ClaudeCliExecutor),
+    and a Postgres URL routinely carries a password -- `assert_resolved`
+    exists precisely to keep plaintext secrets out of that file. The DB URL
+    the gate server needs is instead injected via RunRequest.env, which
+    ClaudeCliExecutor merges into the *subprocess environment* only
+    (`{**os.environ, **req.env}`), never onto disk; the MCP child inherits
+    that process environment. See `_build_request` below.
     """
     return {"command": sys.executable, "args": ["-m", "aicom.gate.server"]}
 
@@ -153,7 +162,24 @@ class Worker:
         mcp_config, env = resolve_secrets(
             {**agent.mcp_config, GATE_SERVER_NAME: gate_server_spec()}, _lookup_secret
         )
+        # The gate server resolves its DB connection from AICOM_DATABASE_URL
+        # in its own process environment, which it inherits from this run's
+        # `claude` subprocess (ClaudeCliExecutor merges `{**os.environ,
+        # **req.env}`). Set explicitly here -- and LAST, so it wins over both
+        # the ambient environment and any same-named var an agent's own
+        # secrets happened to resolve to -- so the gate server can never bind
+        # to a database other than the one this run actually lives in. Never
+        # placed in mcp_config: that dict is written verbatim to disk.
+        env = {**env, "AICOM_DATABASE_URL": self._settings.database_url}
         run.workspace_path = str(workspace)
+        # A crashed/timed-out run's retry is a brand-new Run row (see
+        # _handle_failure), so it never carries a prior gate_error forward.
+        # A RESUMED run (approval decided, same run.id re-executed) is not:
+        # it's this same row, and a gate_error left over from an earlier,
+        # failed gate call in a PRIOR execution of it must not ride along
+        # into whatever this fresh execution reports, or an operator would
+        # see a stale warning about a call this execution never made.
+        run.gate_error = None
         allowed = tuple(agent.allowed_tools) + (GATE_TOOL,)
         granted = self._approved_gated_tool(session, run, gated)
         if granted is not None:
@@ -331,6 +357,25 @@ class Worker:
         run.exit_reason = outcome.reason.value
         session.flush()
 
+        # The gate MCP subprocess stamps this (best-effort, from its own
+        # process) when it could not durably record an approval -- e.g. the
+        # agent called request_approval_tool, got ApprovalRecordingFailed,
+        # and still terminated as though the run were clean. That error was
+        # loud to the model, but the model choosing to proceed anyway means
+        # this log line is the only place an operator watching logs (rather
+        # than this run's raw event stream) learns anything needed sign-off
+        # and never got it. Checked here, before branching on outcome, so it
+        # covers every ending this execution can have -- not just the clean
+        # SUCCEEDED path where the blind spot was originally found.
+        if run.gate_error:
+            logger.error(
+                "run %s finished (%s) but the gate reported an unrecorded "
+                "approval attempt: %s",
+                run.id,
+                outcome.reason.value,
+                run.gate_error,
+            )
+
         if outcome.reason is ExitReason.USAGE_LIMIT:
             self._handle_usage_limit(session, run, outcome, now)
             return
@@ -379,13 +424,27 @@ class Worker:
             label=f"{run.task.agent.name}/{run.task.title}",
         )
         run.task.status = TaskStatus.DONE
+        summary = f"Completed. Artifacts: {sha or 'none'}"
+        # Already logged above (covers every outcome branch); this is the
+        # SUCCEEDED-specific piece: pushing it into the same Slack channel
+        # every other run report already uses, since a clean-looking
+        # "Completed" summary is precisely the blind spot the live
+        # experiment found -- a failure report from _handle_failure or an
+        # approval dispatch from _dispatch_approval already gives an
+        # operator SOME signal something happened on those other paths.
+        if run.gate_error:
+            summary = (
+                f"{summary}\n\n"
+                f"WARNING: a gate approval request failed to record during this "
+                f"run and was NOT signed off: {run.gate_error}"
+            )
         self._notifier.send_run_report(
             RunReport(
                 run_id=run.id,
                 agent_name=run.task.agent.name,
                 task_title=run.task.title,
                 status=RunStatus.SUCCEEDED,
-                summary=f"Completed. Artifacts: {sha or 'none'}",
+                summary=summary,
                 cost_usd=outcome.cost_usd,
             )
         )
