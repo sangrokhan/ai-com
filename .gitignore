@@ -5,3 +5,8 @@ __pycache__/
 
 # Session scratch (SDD ledgers, agent reports)
 .superpowers/
+
+# Runtime directories (default AICOM_WORKSPACE_ROOT / AICOM_ARTIFACT_REPO_PATH):
+# per-run agent workspaces and the artifact repo (its own nested git repo).
+/workspaces/
+/artifacts/

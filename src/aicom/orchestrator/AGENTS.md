@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-11 | Updated: 2026-08-11 -->
+<!-- Generated: 2026-08-11 | Updated: 2026-08-13 -->
 
 # orchestrator
 
@@ -18,6 +18,7 @@ caller of `Worker` and `Sweeper` in production.
 | `scheduler.py` | `Scheduler`: turns due recurring `Schedule` rows into a `Task` + first `Run`. |
 | `artifacts.py` | `commit_run_artifacts()`: copies a run's workspace files into the artifact git repo and commits. |
 | `prompts.py` | `build_prompt()`: renders the task prompt, including the resume/sign-off addendum. |
+| `staging.py` | `stage_previous_reports()`: copies a schedule's recent report artifacts into `workspace/previous/` before the run starts. |
 
 ## Public Interface
 ```python
@@ -53,6 +54,14 @@ def build_prompt(task_title: str, goal: str, resume_note: str | None) -> str: ..
 class Scheduler:
     def __init__(self, sessions: sessionmaker[Session], notifier: Notifier) -> None: ...
     def tick(self, now: datetime) -> int: ...  # number of tasks created
+
+# staging.py
+PREVIOUS_DIR = "previous"
+PREVIOUS_REPORT_LIMIT = 5
+
+def stage_previous_reports(session: Session, run: Run, workspace: Path,
+                            artifact_repo: Path, *, limit: int = PREVIOUS_REPORT_LIMIT) -> int: ...
+    # returns how many were staged; creates no `previous/` dir when there is nothing to stage
 ```
 
 ## For AI Agents
@@ -114,12 +123,41 @@ class Scheduler:
   check against the system-wide LLM pause: a paused account simply leaves the
   previous run `QUEUED`/`RUNNING`, which `has_unfinished_cycle` already treats
   as an unfinished cycle and skips.
+- **Memory is staged into the run's own workspace, never granted as access to the
+  artifact repository.** `_build_request` calls `stage_previous_reports` right after
+  `prepare_workspace`, before the gate MCP server is wired in. The alternative —
+  giving an agent `--add-dir` onto the artifact repo — was rejected by design (spec
+  §4): `--add-dir` today confines each run to its own workspace, and opening the
+  artifact repo would let every agent read everything every agent has ever produced,
+  widening a filesystem boundary this project has been careful about. Copying the
+  handful of files it actually needs into `workspace/previous/` keeps the boundary
+  intact while still giving the agent its memory, at the cost of the copy being a
+  snapshot rather than live.
+- **A staging failure is logged and the run proceeds anyway.** `_build_request` wraps
+  `stage_previous_reports` in a bare `except Exception` — the choice is deliberate
+  (spec §4): losing the memory makes the agent repeat itself, which is a worse report
+  but still a report; failing the run over a staging error produces nothing at all.
+  The first is treated as the lesser harm.
+- **`stage_previous_reports` only recognizes files whose committed `Artifact.path`
+  is exactly `store.artifacts_query.REPORT_FILENAME` (`"report.md"`).** An agent whose
+  persona asks it to "write your report to `report.md`" but that in practice writes to
+  some other filename produces an artifact staging silently treats as not a report —
+  no error, no directory, just nothing carried forward. This is not hypothetical: see
+  the "Known limitation" note in `packs/AGENTS.md`, found by running the opportunity
+  pack for real (S5a Task 4) — `agent.persona` is not currently included in the prompt
+  at all (`prompts.py:build_prompt` only uses `Task.title`/`Task.goal`), so neither of
+  the opportunity pack's two live runs wrote `report.md`, and the second run got no
+  `previous/` directory as a result.
 
 ### Testing Requirements
 Covered by `tests/orchestrator/test_worker.py`, `test_sweeper.py`, `test_artifacts.py`,
-`test_scheduler.py`, using `FakeExecutor`/`FakeNotifier` fixtures from
+`test_scheduler.py`, `test_staging.py`, using `FakeExecutor`/`FakeNotifier` fixtures from
 `tests/orchestrator/conftest.py` and a real Postgres via testcontainers. Run:
-`.venv/bin/pytest tests/orchestrator -m "not smoke"`.
+`.venv/bin/pytest tests/orchestrator -m "not smoke"`. Whether a scheduled agent's report
+is actually *good*, and whether memory in practice stops it repeating itself, cannot be
+asserted by this suite — see the "Known limitation" note above and
+`.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md` for the judgement from
+running it against the real CLI.
 
 ### Common Patterns
 - Every DB-mutating step opens its own `with self._sessions() as session:` block and
