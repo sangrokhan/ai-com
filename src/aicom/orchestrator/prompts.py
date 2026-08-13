@@ -37,6 +37,18 @@ def build_prompt(task_title: str, goal: str, persona: str, resume_note: str | No
     # persona configured (persona == "", true of every agent row before this pack)
     # gets exactly the prompt it always got: persona_block is empty, so the standard
     # operating rules paragraph is the first thing under the heading, unchanged.
+    #
+    # This ordering is NOT a security boundary and must not be treated as one: there
+    # is no property of how these models process text that makes earlier prose bind
+    # more strongly than later prose -- if anything, recency tends to matter more, not
+    # less. A persona that said "ignore the instructions that follow" would not be
+    # neutralised by appearing first. The actual guarantee that an operator-supplied
+    # persona cannot escape the autonomy boundary lives entirely outside this prompt
+    # text: `--allowedTools` is computed in code from `agent.allowed_tools` plus the
+    # gate tool (see worker.py's `_build_request`), the gate MCP server is injected by
+    # code rather than by convention, and an approved gated tool is whitelisted for
+    # exactly one execution. Persona prose cannot change any of that -- prompt
+    # ordering here is a readability choice, not a control.
     persona_block = f"{persona.strip()}\n\n" if persona.strip() else ""
     prompt = _BASE.format(title=task_title, goal=goal, persona_block=persona_block)
     if resume_note:

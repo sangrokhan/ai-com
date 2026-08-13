@@ -156,6 +156,13 @@ with "Nothing has changed on this beat since my last report" instead of repeatin
   ships one, verify end to end that an agent calling `request_approval_tool` actually
   parks its run — the smoke test proves the CLI accepts the gate config, not that the
   gate server connected, because `claude` tolerates a failed MCP server.
+- **`agent.persona` is operator-authored prompt text, not a security boundary, and the
+  opportunity pack holds `WebFetch`.** A persona that instructed the agent to encode
+  workspace contents into a URL and fetch it would be constrained only by the prompt,
+  not by any code-enforced control — unlike money/publication/third-party contact,
+  which the gate makes impossible regardless of persona. Acceptable for this pack,
+  which handles nothing sensitive; re-evaluate before a future pack with `WebFetch`
+  handles sensitive data.
 
 ## Dependencies
 

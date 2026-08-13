@@ -19,8 +19,9 @@ from aicom.orchestrator.artifacts import commit_run_artifacts
 from aicom.orchestrator.prompts import build_prompt
 from aicom.orchestrator.staging import stage_previous_reports
 from aicom.quota.reset import fallback_backoff, parse_reset_at
+from aicom.store.artifacts_query import REPORT_FILENAME
 from aicom.store.events import append_event
-from aicom.store.models import Approval, Event, Run, SystemState
+from aicom.store.models import Approval, Artifact, Event, Run, SystemState
 from aicom.store.runs import claim_next_queued, touch_heartbeat, transition
 from aicom.store.system_state import (
     clear_pause,
@@ -387,6 +388,32 @@ class Worker:
             repo=self._settings.artifact_repo_path,
             label=f"{run.task.agent.name}/{run.task.title}",
         )
+        # The `report.md` filename contract that gives a schedule memory (see
+        # staging.stage_previous_reports / artifacts_query.recent_schedule_reports) is
+        # enforced only by the persona's prose, not by anything in code -- an agent
+        # that writes its findings under a different filename fails silently: the next
+        # run's `previous/` is just empty, indistinguishable from "first run ever".
+        # This is the one place both facts (which schedule, which artifacts were just
+        # recorded) are known together, so it is the only place that can catch it.
+        schedule_id = run.task.schedule_id
+        if schedule_id is not None:
+            session.flush()
+            has_report = (
+                session.scalar(
+                    select(Artifact).where(
+                        Artifact.run_id == run.id, Artifact.path == REPORT_FILENAME
+                    )
+                )
+                is not None
+            )
+            if not has_report:
+                logger.warning(
+                    "run %s (schedule %s) recorded no artifact named %s; the next run "
+                    "of this schedule will have no memory of this one",
+                    run.id,
+                    schedule_id,
+                    REPORT_FILENAME,
+                )
         run.task.status = TaskStatus.DONE
         self._notifier.send_run_report(
             RunReport(
