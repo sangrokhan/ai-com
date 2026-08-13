@@ -24,9 +24,7 @@ def test_real_cli_completes_a_trivial_task(tmp_path: Path) -> None:
         prompt="Write the single word 'ok' to a file named result.txt. Then stop.",
         workspace=workspace,
         allowed_tools=("Write", GATE_TOOL),
-        mcp_config={
-            GATE_SERVER_NAME: gate_server_spec("postgresql+psycopg://unused/unused")
-        },
+        mcp_config={GATE_SERVER_NAME: gate_server_spec()},
         env={},
         resume_session_id=None,
         timeout_seconds=180,

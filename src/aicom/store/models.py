@@ -142,6 +142,16 @@ class Run(Base):
     exit_reason: Mapped[str | None] = mapped_column(String(40), default=None)
     session_id: Mapped[str | None] = mapped_column(String(120), default=None)
     workspace_path: Mapped[str | None] = mapped_column(String(512), default=None)
+    # Set by the gate MCP subprocess (a separate OS process, possibly its own
+    # separate DB session/connection from the worker's) when it could not
+    # durably record an approval. A blind UPDATE by primary key -- deliberately
+    # NOT routed through the `event` table, whose (run_id, seq) ordering is
+    # owned in-process by the worker's stdout reader and would race a
+    # concurrent writer in a different process. Checked by the worker at
+    # finalize time so a run that finishes SUCCEEDED after a silently-dropped
+    # gate call is still surfaced to the operator (Slack + logs), not just to
+    # the agent mid-run.
+    gate_error: Mapped[str | None] = mapped_column(Text, default=None)
 
     task: Mapped[Task] = relationship(lazy="joined")
 

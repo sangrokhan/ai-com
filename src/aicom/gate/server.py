@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from aicom.config import load_settings
 from aicom.gate.service import request_approval
 from aicom.store.db import make_engine, session_factory
+from aicom.store.runs import record_gate_error
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,30 @@ class ApprovalRecordingFailed(Exception):
     """
 
 
+def _try_record_gate_error(run_id: uuid.UUID, kind: str, exc: Exception) -> None:
+    """Best-effort: stamp `Run.gate_error` so the failure is discoverable on
+    the orchestrator side, not just inside this MCP subprocess's own stderr
+    (which the `claude` CLI absorbs into its MCP logs, and which
+    `ClaudeCliExecutor` otherwise discards). The worker checks this column at
+    finalize time and, if set, surfaces it via its normal Slack run-report
+    path and its own logs -- channels an operator actually watches.
+
+    Uses a FRESH session, deliberately separate from the one that just
+    failed above (which may itself be unusable, e.g. mid-rollback). Any
+    failure here is swallowed: this is a best-effort secondary signal, and
+    must never replace the logger.exception call or the raised
+    ApprovalRecordingFailed as the primary evidence trail.
+    """
+    try:
+        with _sessions() as session:
+            record_gate_error(session, run_id, f"{kind}: {exc}")
+            session.commit()
+    except Exception:
+        logger.exception(
+            "run %s: also failed to persist gate_error for operator visibility", run_id
+        )
+
+
 @mcp.tool()
 def request_approval_tool(kind: str, proposal: str, payload: dict | None = None) -> str:
     """Submit a completed proposal for human sign-off, then terminate.
@@ -54,14 +79,18 @@ def request_approval_tool(kind: str, proposal: str, payload: dict | None = None)
     Raises ApprovalRecordingFailed, never returns a success message, if the
     approval could not be durably recorded -- e.g. this MCP server's database
     connection does not match the one the run actually lives in (see
-    `gate_server_spec` in aicom.orchestrator.worker), or the run was no
-    longer RUNNING when this was called. Either way, no half-state is left
-    behind: the underlying session is never committed on this path, so any
+    `gate_server_spec` in aicom.orchestrator.worker), the run was no longer
+    RUNNING when this was called, or AICOM_RUN_ID itself is missing/malformed.
+    Either way, no half-state is left behind for the approval flow: the
+    underlying session is never committed on this path, so any
     flushed-but-uncommitted approval row is discarded when the session
-    closes.
+    closes. Also makes a best-effort attempt to stamp `Run.gate_error` (see
+    `_try_record_gate_error`) so the failure reaches the operator, not just
+    the model.
     """
-    run_id = uuid.UUID(os.environ["AICOM_RUN_ID"])
+    run_id: uuid.UUID | None = None
     try:
+        run_id = uuid.UUID(os.environ["AICOM_RUN_ID"])
         with _sessions() as session:
             result = request_approval(
                 session,
@@ -78,6 +107,8 @@ def request_approval_tool(kind: str, proposal: str, payload: dict | None = None)
             run_id,
             kind,
         )
+        if run_id is not None:
+            _try_record_gate_error(run_id, kind, exc)
         raise ApprovalRecordingFailed(
             f"Approval was NOT recorded for run {run_id} (kind={kind}): {exc}. "
             "You do not have sign-off. Do not proceed with the gated action and "

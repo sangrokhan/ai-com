@@ -44,7 +44,7 @@ GATE_TOOL_FUNCTION = "request_approval_tool"  # the @mcp.tool() function name
 GATE_TOOL = f"mcp__{GATE_SERVER_NAME}__{GATE_TOOL_FUNCTION}"
 
 
-def gate_server_spec(database_url: str) -> dict[str, object]:
+def gate_server_spec() -> dict[str, object]:
     """Spawn spec for the gate MCP server, injected into every run.
 
     Equivalent to `python -m aicom.gate.server`, but pinned to the interpreter
@@ -52,23 +52,16 @@ def gate_server_spec(database_url: str) -> dict[str, object]:
     virtualenv. The server reads AICOM_RUN_ID from the environment, which
     ClaudeCliExecutor injects per run.
 
-    `database_url` is the worker's OWN `settings.database_url`, forwarded
-    explicitly via this spec's per-server `env`. The gate server otherwise
-    builds its own `Settings()` from the ambient process environment of the
-    spawned subprocess, which need not agree with the worker's -- e.g. a
-    `Worker` constructed with an explicit `Settings` (every test does this,
-    and any embedding of this code plausibly would). When the two disagree,
-    the gate server connects to a different database than the run it is
-    recording an approval for, and the approval INSERT fails with a foreign
-    key violation while the agent's run finishes as if nothing needed
-    sign-off. Setting this here, rather than relying on ambient
-    AICOM_DATABASE_URL, makes that divergence structurally impossible.
+    Deliberately carries NO database_url of its own: this dict is written
+    verbatim to the `mcp.json` config file on disk (see ClaudeCliExecutor),
+    and a Postgres URL routinely carries a password -- `assert_resolved`
+    exists precisely to keep plaintext secrets out of that file. The DB URL
+    the gate server needs is instead injected via RunRequest.env, which
+    ClaudeCliExecutor merges into the *subprocess environment* only
+    (`{**os.environ, **req.env}`), never onto disk; the MCP child inherits
+    that process environment. See `_build_request` below.
     """
-    return {
-        "command": sys.executable,
-        "args": ["-m", "aicom.gate.server"],
-        "env": {"AICOM_DATABASE_URL": database_url},
-    }
+    return {"command": sys.executable, "args": ["-m", "aicom.gate.server"]}
 
 
 class GatedToolMisconfiguration(Exception):
@@ -167,9 +160,17 @@ class Worker:
         # being handed GATE_TOOL in --allowedTools. Injected last so it always
         # wins over any same-named key the agent config carries.
         mcp_config, env = resolve_secrets(
-            {**agent.mcp_config, GATE_SERVER_NAME: gate_server_spec(self._settings.database_url)},
-            _lookup_secret,
+            {**agent.mcp_config, GATE_SERVER_NAME: gate_server_spec()}, _lookup_secret
         )
+        # The gate server resolves its DB connection from AICOM_DATABASE_URL
+        # in its own process environment, which it inherits from this run's
+        # `claude` subprocess (ClaudeCliExecutor merges `{**os.environ,
+        # **req.env}`). Set explicitly here -- and LAST, so it wins over both
+        # the ambient environment and any same-named var an agent's own
+        # secrets happened to resolve to -- so the gate server can never bind
+        # to a database other than the one this run actually lives in. Never
+        # placed in mcp_config: that dict is written verbatim to disk.
+        env = {**env, "AICOM_DATABASE_URL": self._settings.database_url}
         run.workspace_path = str(workspace)
         allowed = tuple(agent.allowed_tools) + (GATE_TOOL,)
         granted = self._approved_gated_tool(session, run, gated)
@@ -396,13 +397,35 @@ class Worker:
             label=f"{run.task.agent.name}/{run.task.title}",
         )
         run.task.status = TaskStatus.DONE
+        summary = f"Completed. Artifacts: {sha or 'none'}"
+        # The gate MCP subprocess stamps this (best-effort, from its own
+        # process) when it could not durably record an approval -- e.g. the
+        # agent called request_approval_tool, got ApprovalRecordingFailed,
+        # and still terminated as though the run were clean. That error was
+        # loud to the model, but the model choosing to proceed anyway means
+        # this is the ONLY place an operator watching Slack/logs (rather
+        # than this run's raw event stream) learns anything needed sign-off
+        # and never got it. Never silently drop it into a normal "Completed"
+        # report.
+        if run.gate_error:
+            logger.error(
+                "run %s finished SUCCEEDED but the gate reported an unrecorded "
+                "approval attempt: %s",
+                run.id,
+                run.gate_error,
+            )
+            summary = (
+                f"{summary}\n\n"
+                f"WARNING: a gate approval request failed to record during this "
+                f"run and was NOT signed off: {run.gate_error}"
+            )
         self._notifier.send_run_report(
             RunReport(
                 run_id=run.id,
                 agent_name=run.task.agent.name,
                 task_title=run.task.title,
                 status=RunStatus.SUCCEEDED,
-                summary=f"Completed. Artifacts: {sha or 'none'}",
+                summary=summary,
                 cost_usd=outcome.cost_usd,
             )
         )

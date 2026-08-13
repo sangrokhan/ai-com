@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -82,6 +83,40 @@ def test_successful_run_persists_events_and_reports(
     assert refreshed.token_out == 9
     assert len(notifier.reports) == 1
     assert executor.requests[0].allowed_tools[-1] == "mcp__gate__request_approval_tool"
+
+
+def test_a_run_that_succeeds_after_an_unrecorded_gate_call_still_warns_the_operator(
+    sessions: sessionmaker[Session],
+    session: Session,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The gate MCP subprocess stamps Run.gate_error (best-effort, from its
+    own process) when it could not durably record an approval. Even if the
+    model then terminates as though nothing were wrong and the CLI exits 0,
+    the worker must not silently report a clean success -- that is exactly
+    the blind spot the live experiment found: the model apologized for the
+    gate error and the run still finished SUCCEEDED with zero operator
+    signal anywhere but the raw event stream."""
+    run = _queued(session)
+    run.gate_error = "spend: relation violates foreign key constraint"
+    session.commit()
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+
+    with caplog.at_level(logging.ERROR):
+        assert _worker(sessions, executor, notifier, tmp_path).tick(NOW) is True
+
+    session.expire_all()
+    refreshed = session.get(Run, run.id)
+    assert refreshed is not None
+    assert refreshed.status is RunStatus.SUCCEEDED  # unchanged: no new invariant here
+
+    assert len(notifier.reports) == 1
+    assert "gate" in notifier.reports[0].summary.lower()
+    assert "relation violates foreign key constraint" in notifier.reports[0].summary
+    assert any(str(run.id) in record.message for record in caplog.records)
 
 
 def test_crash_retries_then_fails_after_max_attempts(
@@ -472,7 +507,13 @@ def test_gate_server_env_carries_the_workers_own_database_url(
     the run actually lives in -- the approval INSERT then fails with a
     foreign-key violation, the agent's run finishes `succeeded`, and there
     is no approval row and no Slack notification. This must never depend on
-    the ambient environment agreeing with the worker's own settings."""
+    the ambient environment agreeing with the worker's own settings.
+
+    Asserted on `RunRequest.env` (merged into the subprocess environment by
+    ClaudeCliExecutor), NOT on `mcp_config`: the latter is written verbatim
+    to a config file on disk, and a Postgres URL routinely carries a
+    password -- it must never land there.
+    """
     # Ambient env deliberately disagrees with the worker's Settings, so a
     # fix that (re)reads os.environ instead of using settings.database_url
     # would be caught here.
@@ -484,10 +525,11 @@ def test_gate_server_env_carries_the_workers_own_database_url(
 
     _worker(sessions, executor, notifier, tmp_path).tick(NOW)
 
-    config = executor.requests[0].mcp_config
-    assert config[GATE_SERVER_NAME]["env"]["AICOM_DATABASE_URL"] == (
-        "postgresql+psycopg://unused/unused"
-    )
+    request = executor.requests[0]
+    assert request.env["AICOM_DATABASE_URL"] == "postgresql+psycopg://unused/unused"
+    # And it must never be written to the on-disk MCP config.
+    assert "env" not in request.mcp_config[GATE_SERVER_NAME]
+    assert "postgresql" not in json.dumps(request.mcp_config)
 
 
 def test_injected_gate_entry_wins_over_a_conflicting_agent_key(
