@@ -92,29 +92,33 @@ def main(argv: list[str]) -> int: ...  # `python -m aicom.packs.seed <pack>` ent
   that tool if it is not caught, so the worker treats it as fatal misconfiguration instead
   of tolerating it. `opportunity.py`'s `gated_tools` is `()` for exactly this reason: the
   pack has no gated action to grant, so there is nothing to accidentally overlap.
-- **A pack's persona currently has no code path that delivers it to the CLI.** Read the
-  "Known limitation" note below before assuming `PackAgent.persona` reaches the agent.
+- **A pack's persona is delivered to the CLI as part of "## Operating rules".**
+  `orchestrator/prompts.py:build_prompt(task_title, goal, persona, resume_note)` puts
+  `agent.persona` (stripped, blank line appended) at the top of the operating-rules
+  section, ahead of the standard autonomy-boundary paragraph — not appended after the
+  goal, and not a separate trailing section, so the agent reads what kind of agent it
+  is before it starts acting on the goal. An agent with `persona == ""` (every agent
+  row before this pack) gets exactly the prompt it always got: the standard rules
+  paragraph is the first thing under the heading, unchanged. See "Verified against the
+  live CLI" below.
 
-### Known limitation found while running this pack for real (S5a, Task 4)
+### Verified against the live CLI (S5a, Task 4)
 
-`orchestrator/prompts.py:build_prompt(task_title, goal, resume_note)` builds the entire
-prompt handed to the Claude CLI from the `Task.title` and `Task.goal` only.
-`Worker._build_request` (`orchestrator/worker.py`) calls it exactly that way — `agent.persona`
-is read nowhere in the request-building path. Concretely: `Agent.persona` is stored (seeded
-by `seed_pack` from `PackAgent.persona`) but **never sent to the CLI in any run**, scheduled
-or otherwise. This is a gap in the orchestrator, not in this pack's definition; it is
-recorded here because running the opportunity pack for real is what surfaced it.
+A first run of this pack surfaced that `agent.persona` was not being routed into the
+prompt at all — `build_prompt` used only `Task.title`/`Task.goal`, so the persona's two
+operating instructions ("write to `report.md`", "read `previous/` first") never reached
+the agent, and the memory feature (`staging.py`) was consequently unreachable: neither
+of two live runs wrote `report.md`, so `stage_previous_reports` (which filters on
+`Artifact.path == REPORT_FILENAME`, see `store/AGENTS.md`) found nothing to stage on the
+second run, which then repeated several findings from the first.
 
-Effect observed against the live `claude` CLI, twice: the `scout` agent produced strong,
-well-sourced reports, but ignored the two persona instructions that never reached
-it — it did not write to `report.md` (each run invented its own filename instead), and,
-because `stage_previous_reports` only stages artifacts whose `Artifact.path` is exactly
-`report.md` (`store/artifacts_query.py:REPORT_FILENAME`), the second run got no `previous/`
-directory and repeated several items from the first report's findings. See
-`.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md` for the full transcript and
-judgement. Fixing this (routing `agent.persona` into the prompt) is orchestrator-layer work
-outside this task's scope — do not work around it by hardcoding pack-specific behaviour
-here; fix `build_prompt`/`_build_request` once, for every pack.
+That gap is fixed (see "Working In This Directory" above). Re-run against the live CLI
+after the fix, twice: both runs wrote `report.md`; the second run's workspace received a
+`previous/00-<run-id>.md` directory containing the first report; and the second report
+opened with "**Nothing has changed on this beat since my last report**" and spent the
+rest of the file on clearly-labelled backfill and open items carried forward from the
+first report, rather than repeating any of its findings. Full transcripts and both
+report texts: `.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md`.
 
 ### Testing Requirements
 

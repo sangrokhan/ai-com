@@ -11,6 +11,7 @@ def make_agent(
     session: Session,
     name: str = "researcher",
     *,
+    persona: str = "# Researcher\nYou research things.",
     allowed_tools: list[str] | None = None,
     gated_tools: list[str] | None = None,
     mcp_config: dict | None = None,
@@ -18,7 +19,7 @@ def make_agent(
     agent = Agent(
         id=uuid.uuid4(),
         name=f"{name}-{uuid.uuid4().hex[:6]}",
-        persona="# Researcher\nYou research things.",
+        persona=persona,
         allowed_tools=allowed_tools if allowed_tools is not None else ["Read", "Grep", "WebSearch"],
         gated_tools=gated_tools if gated_tools is not None else [],
         mcp_config=mcp_config if mcp_config is not None else {},

@@ -83,6 +83,33 @@ def test_successful_run_persists_events_and_reports(
     assert executor.requests[0].allowed_tools[-1] == "mcp__gate__request_approval_tool"
 
 
+def test_build_request_includes_the_agents_persona_in_the_prompt(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    distinctive = "You are Zx-Scout-9000, patrol the beat and never invent a finding."
+    run = _queued(session, persona=distinctive)
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    worker = _worker(sessions, executor, notifier, tmp_path)
+
+    request = worker._build_request(session, run)
+
+    assert distinctive in request.prompt
+
+
+def test_build_request_with_an_empty_persona_still_has_goal_and_operating_rules(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    run = _queued(session, persona="")
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    worker = _worker(sessions, executor, notifier, tmp_path)
+
+    request = worker._build_request(session, run)
+
+    assert "Find things." in request.prompt  # the task's goal, from _queued()
+    assert "## Operating rules" in request.prompt
+    assert "request_approval_tool" in request.prompt
+
+
 def test_crash_retries_then_fails_after_max_attempts(
     sessions: sessionmaker[Session], session: Session, tmp_path: Path
 ) -> None:

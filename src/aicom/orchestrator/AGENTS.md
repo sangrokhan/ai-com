@@ -48,7 +48,7 @@ def commit_run_artifacts(session: Session, *, run_id: uuid.UUID, workspace: Path
                           repo: Path, label: str) -> str | None: ...  # returns commit sha or None
 
 # prompts.py
-def build_prompt(task_title: str, goal: str, resume_note: str | None) -> str: ...
+def build_prompt(task_title: str, goal: str, persona: str, resume_note: str | None) -> str: ...
 
 # scheduler.py
 class Scheduler:
@@ -142,22 +142,40 @@ def stage_previous_reports(session: Session, run: Run, workspace: Path,
   is exactly `store.artifacts_query.REPORT_FILENAME` (`"report.md"`).** An agent whose
   persona asks it to "write your report to `report.md`" but that in practice writes to
   some other filename produces an artifact staging silently treats as not a report —
-  no error, no directory, just nothing carried forward. This is not hypothetical: see
-  the "Known limitation" note in `packs/AGENTS.md`, found by running the opportunity
-  pack for real (S5a Task 4) — `agent.persona` is not currently included in the prompt
-  at all (`prompts.py:build_prompt` only uses `Task.title`/`Task.goal`), so neither of
-  the opportunity pack's two live runs wrote `report.md`, and the second run got no
-  `previous/` directory as a result.
+  no error, no directory, just nothing carried forward. This makes correctly delivering
+  `agent.persona` to the CLI (below) load-bearing for memory to work at all, not merely
+  cosmetic.
+- **`agent.persona` is included in the prompt, at the top of "## Operating rules".**
+  `build_prompt(task_title, goal, persona, resume_note)` (`prompts.py`) puts the
+  persona ahead of the standard autonomy-boundary paragraph, and `_build_request`
+  passes `agent.persona` — this was not always true. Running the opportunity pack
+  against the real CLI (S5a Task 4) first surfaced that `agent.persona` was not
+  wired into the prompt at all: neither of two live runs wrote `report.md`, so the
+  bullet above bit immediately and the second run got no `previous/` directory. After
+  wiring persona into `build_prompt`, two more live runs confirmed the fix: both wrote
+  `report.md`, the second run's workspace received `previous/00-<run-id>.md`, and the
+  second report opened with "Nothing has changed on this beat since my last report"
+  instead of repeating the first. An agent with `persona == ""` (every agent row
+  before this pack existed) still gets exactly the prompt it always got — the persona
+  block is empty, so the standard rules paragraph is unchanged. See
+  `.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md` for both full report
+  texts and `tests/orchestrator/test_worker.py`'s
+  `test_build_request_includes_the_agents_persona_in_the_prompt` /
+  `test_build_request_with_an_empty_persona_still_has_goal_and_operating_rules` for the
+  regression tests that would now catch this if it broke again.
 
 ### Testing Requirements
 Covered by `tests/orchestrator/test_worker.py`, `test_sweeper.py`, `test_artifacts.py`,
 `test_scheduler.py`, `test_staging.py`, using `FakeExecutor`/`FakeNotifier` fixtures from
 `tests/orchestrator/conftest.py` and a real Postgres via testcontainers. Run:
-`.venv/bin/pytest tests/orchestrator -m "not smoke"`. Whether a scheduled agent's report
-is actually *good*, and whether memory in practice stops it repeating itself, cannot be
-asserted by this suite — see the "Known limitation" note above and
+`.venv/bin/pytest tests/orchestrator -m "not smoke"`. `test_worker.py` asserts a
+distinctive persona string lands in `RunRequest.prompt`, and that an empty persona still
+produces a prompt with the goal and operating rules — that is the extent of what an
+automated test can check. Whether a scheduled agent's report is actually *good*, and
+whether memory in practice stops it repeating itself, still cannot be asserted by this
+suite — see the "Memory" section above and
 `.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md` for the judgement from
-running it against the real CLI.
+running it against the real CLI, both before and after the persona fix.
 
 ### Common Patterns
 - Every DB-mutating step opens its own `with self._sessions() as session:` block and

@@ -136,12 +136,16 @@ runs on, spends money, executes an order, publishes anything, or contacts a thir
 The system's stated goal of a profitable service is still unmet: reaching it needs the
 trading, content, or freelance pack, none of which exist yet. S5a's purpose was narrower —
 prove the worker/scheduler/gate machinery holds up under one real recurring job, and find
-out whether an agent given a persona and memory actually behaves like it. Both live runs
-(see `.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md`) produced reports
-worth reading, but also surfaced a real gap: `agent.persona` is not currently included in
-the prompt sent to the CLI at all (see `src/aicom/orchestrator/AGENTS.md`), so persona
-instructions — including "write to `report.md`" — are not reliably followed yet. That
-gap, not agent packs in general, is what should be fixed before promising memory works.
+out whether an agent given a persona and memory actually behaves like it. Live runs
+against the real CLI (see `.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md`)
+produced reports worth reading throughout, and also surfaced a real gap: `agent.persona`
+was not being routed into the prompt sent to the CLI at all, so persona instructions —
+including "write to `report.md`" and "read `previous/` first" — were not reaching the
+agent, and the memory feature could not work as a result. That gap is now fixed
+(`src/aicom/orchestrator/prompts.py:build_prompt` includes `agent.persona`; see
+`src/aicom/orchestrator/AGENTS.md`), and a second pair of live runs confirmed it: both
+wrote `report.md`, `previous/` was staged on the second run, and the second report opened
+with "Nothing has changed on this beat since my last report" instead of repeating itself.
 
 ### Known Limitations
 
@@ -152,13 +156,6 @@ gap, not agent packs in general, is what should be fixed before promising memory
   ships one, verify end to end that an agent calling `request_approval_tool` actually
   parks its run — the smoke test proves the CLI accepts the gate config, not that the
   gate server connected, because `claude` tolerates a failed MCP server.
-- **`agent.persona` is stored but never sent to the CLI.** `orchestrator/prompts.py`'s
-  `build_prompt` builds the whole prompt from `Task.title`/`Task.goal` only; nothing in
-  `Worker._build_request` reads `agent.persona`. Found by running the opportunity pack
-  against the real `claude` CLI (S5a Task 4): the persona's two operating instructions
-  ("write to `report.md`", "read `previous/` first") were followed by neither of two live
-  runs, because they were never in the prompt the agent saw. See `src/aicom/packs/AGENTS.md`
-  and `.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md`.
 
 ## Dependencies
 

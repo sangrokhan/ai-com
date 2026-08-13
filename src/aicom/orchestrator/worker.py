@@ -179,7 +179,7 @@ class Worker:
         self._resume_flags[run.id] = run.resume_pending
         return RunRequest(
             run_id=run.id,
-            prompt=build_prompt(run.task.title, run.task.goal, run.resume_note),
+            prompt=build_prompt(run.task.title, run.task.goal, agent.persona, run.resume_note),
             workspace=workspace,
             allowed_tools=allowed,
             mcp_config=mcp_config,
