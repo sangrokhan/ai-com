@@ -17,6 +17,7 @@ from aicom.executor.workspace import prepare_workspace
 from aicom.notify.base import Notifier
 from aicom.orchestrator.artifacts import commit_run_artifacts
 from aicom.orchestrator.prompts import build_prompt
+from aicom.orchestrator.staging import stage_previous_reports
 from aicom.quota.reset import fallback_backoff, parse_reset_at
 from aicom.store.events import append_event
 from aicom.store.models import Approval, Event, Run, SystemState
@@ -145,6 +146,14 @@ class Worker:
             raise GatedToolMisconfiguration(agent.name, overlap)
 
         workspace = prepare_workspace(self._settings.workspace_root, agent.name, run.id)
+        try:
+            stage_previous_reports(
+                session, run, workspace, self._settings.artifact_repo_path
+            )
+        except Exception:
+            # Losing the memory makes the agent repeat itself; failing the run
+            # produces nothing at all. The first is the lesser harm.
+            logger.exception("staging previous reports failed for run %s", run.id)
         # The gate server is wired in by CODE, never by convention: an agent
         # whose mcp_config happens to omit (or misname, or shadow) a "gate"
         # entry would otherwise have no route to sign-off at all, while still
