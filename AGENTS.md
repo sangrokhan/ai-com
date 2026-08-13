@@ -1,4 +1,4 @@
-<!-- Generated: 2026-08-11 | Updated: 2026-08-11 -->
+<!-- Generated: 2026-08-11 | Updated: 2026-08-13 -->
 
 # ai-com
 
@@ -127,7 +127,25 @@ are not started, though their schema seams exist.
 | S2 | Slack approval bridge: gate, notify, inbound, sweeper | Shipped |
 | S3 | Scheduler: cron periodic jobs | Shipped |
 | S4 | Web console: sprite dashboard, persona/skill editing, SSE. `api/` is the seam | Not started |
-| S5 | Profit agent packs: trading, content, freelance, opportunity research | Not started |
+| S5a | Opportunity research pack: `packs/`, memory staging (`staging.py`, `artifacts_query.py`) | In progress (S5a) |
+| S5 | Remaining profit agent packs: trading, content, freelance | Not started |
+
+**S5a reports; it does not act.** The opportunity pack watches a beat and writes what
+changed to a file in the artifact repo — nothing in this pack, or in the orchestrator it
+runs on, spends money, executes an order, publishes anything, or contacts a third party.
+The system's stated goal of a profitable service is still unmet: reaching it needs the
+trading, content, or freelance pack, none of which exist yet. S5a's purpose was narrower —
+prove the worker/scheduler/gate machinery holds up under one real recurring job, and find
+out whether an agent given a persona and memory actually behaves like it. Live runs
+against the real CLI (see `.superpowers/sdd/2026-08-13-opportunity-pack/task-4-report.md`)
+produced reports worth reading throughout, and also surfaced a real gap: `agent.persona`
+was not being routed into the prompt sent to the CLI at all, so persona instructions —
+including "write to `report.md`" and "read `previous/` first" — were not reaching the
+agent, and the memory feature could not work as a result. That gap is now fixed
+(`src/aicom/orchestrator/prompts.py:build_prompt` includes `agent.persona`; see
+`src/aicom/orchestrator/AGENTS.md`), and a second pair of live runs confirmed it: both
+wrote `report.md`, `previous/` was staged on the second run, and the second report opened
+with "Nothing has changed on this beat since my last report" instead of repeating itself.
 
 ### Known Limitations
 
@@ -138,6 +156,13 @@ are not started, though their schema seams exist.
   ships one, verify end to end that an agent calling `request_approval_tool` actually
   parks its run — the smoke test proves the CLI accepts the gate config, not that the
   gate server connected, because `claude` tolerates a failed MCP server.
+- **`agent.persona` is operator-authored prompt text, not a security boundary, and the
+  opportunity pack holds `WebFetch`.** A persona that instructed the agent to encode
+  workspace contents into a URL and fetch it would be constrained only by the prompt,
+  not by any code-enforced control — unlike money/publication/third-party contact,
+  which the gate makes impossible regardless of persona. Acceptable for this pack,
+  which handles nothing sensitive; re-evaluate before a future pack with `WebFetch`
+  handles sensitive data.
 
 ## Dependencies
 

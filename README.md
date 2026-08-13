@@ -148,6 +148,28 @@ touching tasks it already created. The `worker + sweeper + scheduler` loop
 (`python -m aicom.main`) fires each due schedule at most once per tick, skipping
 (and advancing the clock past) a slot whose previous cycle is still open.
 
+## Packs
+
+A pack is not a subsystem — it is one `agent` row and one or more `schedule` rows,
+shipped as data plus an idempotent seed command, since there is no UI yet for creating
+an agent by hand. Seed one with:
+
+```bash
+python -m aicom.packs.seed opportunity
+```
+
+Safe to run repeatedly: it upserts by agent name and by `(agent, schedule name)`, so
+running it again prints the same agent id and updates the existing rows rather than
+creating new ones.
+
+The one pack that ships today, `opportunity`, watches a beat — a standing instruction
+like "watch the AI agent tooling space, report what's new, changed, or gone" — and
+writes what it finds to a report in the artifact repo. The beat itself lives entirely
+in the schedule's `goal_template`; there is no separate "beat" table. It reaches no
+gated action: it does not spend, publish, or contact anyone, so it never needs an
+operator's sign-off. See `docs/superpowers/specs/2026-08-13-opportunity-pack-design.md`
+for the design and `src/aicom/packs/AGENTS.md` for how to add a second pack.
+
 ## The approval gate
 
 The `gate` MCP server (`aicom.gate.server`) is injected into every run **in code** by the

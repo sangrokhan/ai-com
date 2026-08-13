@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aicom.orchestrator.artifacts import commit_run_artifacts
+from aicom.orchestrator.staging import PREVIOUS_DIR
 from aicom.store.models import Artifact, Run, Task
 from tests.store.test_models import make_agent
 
@@ -139,3 +140,29 @@ def test_nested_git_directory_is_skipped_but_other_files_still_commit(
 
     assert any(".git" in record.message for record in caplog.records)
     assert any("cloned" in record.message for record in caplog.records)
+
+
+def test_staged_previous_directory_is_excluded_from_the_artifact_sweep(
+    session: Session, tmp_path: Path
+) -> None:
+    run = _run(session)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "report.md").write_text("real output")
+    previous = workspace / PREVIOUS_DIR
+    previous.mkdir()
+    (previous / "00-old-run.md").write_text("staged memory, not this run's output")
+    repo = _repo(tmp_path)
+
+    sha = commit_run_artifacts(
+        session, run_id=run.id, workspace=workspace, repo=repo, label="x"
+    )
+    session.commit()
+
+    assert sha is not None
+    dest = repo / str(run.id)
+    assert (dest / "report.md").read_text() == "real output"
+    assert not (dest / PREVIOUS_DIR).exists()
+
+    rows = list(session.scalars(select(Artifact).where(Artifact.run_id == run.id)))
+    assert {r.path for r in rows} == {"report.md"}

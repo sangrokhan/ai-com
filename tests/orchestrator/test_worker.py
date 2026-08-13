@@ -1,8 +1,10 @@
 import json
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -16,7 +18,8 @@ from aicom.orchestrator.worker import (
     GATE_TOOL_FUNCTION,
     Worker,
 )
-from aicom.store.models import Run, Task
+from aicom.store.artifacts_query import REPORT_FILENAME
+from aicom.store.models import Run, Schedule, Task
 from aicom.store.system_state import get_pause
 from tests.store.test_models import make_agent
 
@@ -34,6 +37,35 @@ def _settings(tmp_path: Path) -> Settings:
 def _queued(session: Session, **agent_kw: object) -> Run:
     agent = make_agent(session, **agent_kw)  # type: ignore[arg-type]
     task = Task(id=uuid.uuid4(), agent_id=agent.id, title="Research", goal="Find things.")
+    session.add(task)
+    session.flush()
+    run = Run(id=uuid.uuid4(), task_id=task.id, attempt=1)
+    session.add(run)
+    session.commit()
+    return run
+
+
+def _scheduled_run(session: Session) -> Run:
+    agent = make_agent(session)
+    schedule = Schedule(
+        id=uuid.uuid4(),
+        agent_id=agent.id,
+        name="beat",
+        cron="0 9 * * *",
+        timezone="UTC",
+        title_template="t",
+        goal_template="g",
+        next_due_at=NOW,
+    )
+    session.add(schedule)
+    session.flush()
+    task = Task(
+        id=uuid.uuid4(),
+        agent_id=agent.id,
+        title="Beat",
+        goal="Watch it.",
+        schedule_id=schedule.id,
+    )
     session.add(task)
     session.flush()
     run = Run(id=uuid.uuid4(), task_id=task.id, attempt=1)
@@ -81,6 +113,33 @@ def test_successful_run_persists_events_and_reports(
     assert refreshed.token_out == 9
     assert len(notifier.reports) == 1
     assert executor.requests[0].allowed_tools[-1] == "mcp__gate__request_approval_tool"
+
+
+def test_build_request_includes_the_agents_persona_in_the_prompt(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    distinctive = "You are Zx-Scout-9000, patrol the beat and never invent a finding."
+    run = _queued(session, persona=distinctive)
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    worker = _worker(sessions, executor, notifier, tmp_path)
+
+    request = worker._build_request(session, run)
+
+    assert distinctive in request.prompt
+
+
+def test_build_request_with_an_empty_persona_still_has_goal_and_operating_rules(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path
+) -> None:
+    run = _queued(session, persona="")
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    worker = _worker(sessions, executor, notifier, tmp_path)
+
+    request = worker._build_request(session, run)
+
+    assert "Find things." in request.prompt  # the task's goal, from _queued()
+    assert "## Operating rules" in request.prompt
+    assert "request_approval_tool" in request.prompt
 
 
 def test_crash_retries_then_fails_after_max_attempts(
@@ -422,6 +481,57 @@ def test_heartbeat_advances_during_a_silent_execution(
     # ticker tick would advance it to real wall-clock time in between.
     assert refreshed.heartbeat_at != NOW
     assert before <= refreshed.heartbeat_at <= after
+
+
+def test_finalize_warns_when_a_scheduled_run_records_no_report_artifact(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`recent_schedule_reports` only recognizes an artifact whose path is
+    exactly `report.md` -- an agent that invents its own filename produces
+    a silent memory failure the next run cannot tell apart from "first run
+    ever". Nothing can force the model's hand, but finalize (the one place
+    that knows both the schedule and what was just committed) can at least
+    make the failure visible."""
+    run = _scheduled_run(session)
+    agent_name = run.task.agent.name
+    workspace = tmp_path / "ws" / agent_name / str(run.id)
+    workspace.mkdir(parents=True)
+    (workspace / "notes.txt").write_text("wrong filename")
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+    worker = _worker(sessions, executor, notifier, tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="aicom.orchestrator.worker"):
+        assert worker.tick(NOW) is True
+
+    assert any(
+        str(run.id) in record.message and REPORT_FILENAME in record.message
+        for record in caplog.records
+    )
+
+
+def test_finalize_does_not_warn_when_the_scheduled_run_wrote_report_md(
+    sessions: sessionmaker[Session], session: Session, tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    run = _scheduled_run(session)
+    agent_name = run.task.agent.name
+    workspace = tmp_path / "ws" / agent_name / str(run.id)
+    workspace.mkdir(parents=True)
+    (workspace / REPORT_FILENAME).write_text("findings")
+
+    executor, notifier = FakeExecutor(), FakeNotifier()
+    executor.queue(run.id, [json.dumps({"type": "result"})])
+    worker = _worker(sessions, executor, notifier, tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="aicom.orchestrator.worker"):
+        assert worker.tick(NOW) is True
+
+    assert not any(
+        "no memory" in record.message for record in caplog.records
+    )
 
 
 # --------------------------------------------------------------------------

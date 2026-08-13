@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from aicom.orchestrator.staging import PREVIOUS_DIR
 from aicom.store.models import Artifact
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,9 @@ def commit_run_artifacts(
     no locking or concurrency handling is needed here.
     """
     all_files = [(p, p.relative_to(workspace).parts) for p in workspace.rglob("*") if p.is_file()]
-    files = [p for p, parts in all_files if ".git" not in parts]
+    files = [
+        p for p, parts in all_files if ".git" not in parts and PREVIOUS_DIR not in parts
+    ]
 
     skipped_git_dirs = Counter(
         parts[: parts.index(".git") + 1] for _, parts in all_files if ".git" in parts
@@ -32,6 +35,20 @@ def commit_run_artifacts(
             Path(*git_dir_parts),
             workspace,
             count,
+        )
+
+    # `previous/` is this run's copied memory (see staging.stage_previous_reports),
+    # not something it produced -- committing it back would re-commit up to
+    # PREVIOUS_REPORT_LIMIT duplicate reports per run, cluttering the artifact repo
+    # and the console's artifact list with files that already have a canonical copy
+    # under their own originating run id.
+    skipped_previous = sum(1 for _, parts in all_files if PREVIOUS_DIR in parts)
+    if skipped_previous:
+        logger.info(
+            "skipping %d file(s) under %s/ in workspace %s (staged memory, not output)",
+            skipped_previous,
+            PREVIOUS_DIR,
+            workspace,
         )
 
     if not files:

@@ -1,15 +1,16 @@
 <!-- Parent: ../../AGENTS.md -->
-<!-- Generated: 2026-08-11 | Updated: 2026-08-11 -->
+<!-- Generated: 2026-08-11 | Updated: 2026-08-13 -->
 
 # aicom
 
 ## Purpose
 
-The orchestrator package. Nine modules with deliberately narrow interfaces: a pure
+The orchestrator package. Ten modules with deliberately narrow interfaces: a pure
 domain layer at the bottom, a persistence layer above it, adapters to the outside world
-(the Claude CLI, the MCP gate, Slack in and out), and an orchestration layer that joins
-them. Every module is independently testable, and the two that touch the outside world
-have fake implementations used by every integration test.
+(the Claude CLI, the MCP gate, Slack in and out), an orchestration layer that joins
+them, and a data-only layer of agent packs on top. Every module is independently
+testable, and the two that touch the outside world have fake implementations used by
+every integration test.
 
 ## Key Files
 
@@ -31,6 +32,7 @@ have fake implementations used by every integration test.
 | `inbound/` | The signature-verified Slack interaction endpoint and the FastAPI app (see `inbound/AGENTS.md`) |
 | `orchestrator/` | Worker loop, sweeper, artifact commits, agent prompts (see `orchestrator/AGENTS.md`) |
 | `api/` | Task/run/approval REST endpoints, the seam for the future web console (see `api/AGENTS.md`) |
+| `packs/` | Agent packs: an agent + schedule(s) as data, plus an idempotent seed command (see `packs/AGENTS.md`) |
 
 ## Dependency Direction
 
@@ -47,11 +49,19 @@ Arrows point at what a module imports. Nothing points back up.
    gate/               └────────┬──────────┴───────────┘
      ▲                          │
      │                     orchestrator/
-   inbound/  ◄──── api/         │
-     ▲                          │
-     └──────────────────────────┘
-                 main.py
+   inbound/  ◄──── api/         │           ▲
+     ▲                          │           │
+     └──────────────────────────┘         packs/
+                 main.py        │      (seeds store/ rows;
+                                 └──── consumed by orchestrator/
+                                       at run time, not imported by it)
 ```
+
+`packs/` imports only `store/` (to write `Agent`/`Schedule` rows) and `domain/cron`
+(to compute a schedule's first `next_due_at`). Nothing in `orchestrator/` imports
+`packs/` — a pack is data the seed command writes into the same tables every other
+agent's rows live in; the worker and scheduler cannot tell a packed agent's run from
+a hand-created one.
 
 `orchestrator/worker.py` is where everything meets — it is the largest module and the
 one where cross-module invariants are easiest to break. `inbound/app.py` mounts

@@ -1,5 +1,5 @@
 <!-- Parent: ../AGENTS.md -->
-<!-- Generated: 2026-08-11 | Updated: 2026-08-11 -->
+<!-- Generated: 2026-08-11 | Updated: 2026-08-13 -->
 
 # store
 
@@ -16,6 +16,7 @@ The persistence layer: SQLAlchemy ORM models and the query/command functions tha
 | `events.py` | Append-only per-run event log writer. |
 | `system_state.py` | Single-row account-wide LLM pause state. |
 | `schedules.py` | Recurring-schedule queries and clock advancement: which schedules are due, claiming a firing, recording a skip, disabling a broken schedule. |
+| `artifacts_query.py` | `recent_schedule_reports`: finds a schedule's most recent report artifacts, for staging an agent's memory. |
 
 ## Public Interface
 ```python
@@ -53,6 +54,11 @@ def claim_firing(session: Session, schedule_id: uuid.UUID, observed_due_at: date
 def has_unfinished_cycle(session: Session, schedule_id: uuid.UUID) -> bool: ...
 def record_skip(session: Session, schedule_id: uuid.UUID, *, now: datetime, reason: str, next_due_at: datetime) -> bool: ...
 def disable(session: Session, schedule_id: uuid.UUID, *, reason: str, now: datetime) -> bool: ...
+
+# artifacts_query.py
+REPORT_FILENAME = "report.md"
+def recent_schedule_reports(session: Session, schedule_id: uuid.UUID, *, limit: int
+                            ) -> list[tuple[uuid.UUID, str]]: ...  # (run_id, path), newest first
 ```
 
 ## For AI Agents
@@ -68,9 +74,10 @@ def disable(session: Session, schedule_id: uuid.UUID, *, reason: str, now: datet
 - **`Agent.mcp_config` (JSONB) stores only `{"secret_ref": ...}`-shaped references, never plaintext secrets.** Never write a raw credential/token/API key into this column.
 - `consume_nonce` is the only way to resolve an `Approval` — it's a conditional `UPDATE ... WHERE nonce = :nonce AND consumed_at IS NULL`, so a duplicate Slack click (or retry) safely returns `None` the second time rather than double-processing.
 - **Callers MUST check the return value of `claim_firing`, for the same reason as `transition()`.** It is a conditional `UPDATE ... WHERE next_due_at = :observed_due_at`, so it returns `False` when another scheduler already won this slot; treating that as a successful claim would double-fire the schedule.
+- **`recent_schedule_reports` orders by `Run.started_at`, not by anything on `Artifact`.** `Artifact` carries no timestamp of its own, and `Run.ended_at` is null whenever a worker crashed mid-run, so neither can be the sort key on its own; `started_at` is the one column guaranteed to be set once a run has produced any artifact at all (ties broken by `Run.id.desc()`). It filters strictly on `Artifact.path == REPORT_FILENAME` (`"report.md"`) — an agent that writes its report under any other filename produces an artifact this query will never return, silently, with no error anywhere. This bit for real the first time the opportunity pack ran against the live CLI, because `agent.persona` (which is what tells the agent to write `report.md`) was not yet being routed into the prompt — see `orchestrator/AGENTS.md`'s "Memory" notes for that fix. Once persona reaches the prompt, the agent writes `report.md` and this query does its job; the query itself needed no change.
 
 ### Testing Requirements
-- `tests/store/test_models.py`, `tests/store/test_runs.py` (with `tests/store/conftest.py` providing the fixture). No dedicated test file yet for `approvals.py`, `events.py`, or `system_state.py`.
+- `tests/store/test_models.py`, `tests/store/test_runs.py`, `tests/store/test_artifacts_query.py` (with `tests/store/conftest.py` providing the fixture). No dedicated test file yet for `approvals.py`, `events.py`, or `system_state.py`.
 - These tests spin up a real Postgres 16 via `testcontainers` — **Docker must be running**.
 - Run with `.venv/bin/pytest tests/store`.
 
